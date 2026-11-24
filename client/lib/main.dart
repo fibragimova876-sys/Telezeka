@@ -15,7 +15,7 @@ class Api {
   Future<dynamic> req(String path,[Map<String,dynamic>? body]) async {
     final uri=Uri.parse('$base$path');
     final r=await client.openUrl(body==null?'GET':'POST',uri);r.headers.set('Authorization','Bearer $token');r.headers.contentType=ContentType.json;
-    if(body!=null)r.write(jsonEncode(body));final res=await r.close().timeout(const Duration(seconds:30));final data=jsonDecode(await utf8.decoder.bind(res).join());if(res.statusCode>=400)throw Exception(data['error']??'Ошибка сети');return data;
+    if(body!=null)r.write(jsonEncode(body));final res=await r.close().timeout(const Duration(seconds:30));final data=jsonDecode(await utf8.decoder.bind(res).join().timeout(const Duration(seconds:30)));if(res.statusCode>=400)throw Exception(data['error']??'Ошибка сети');return data;
   }
 }
 enum TelezekaTheme {system,light,dark}
@@ -105,10 +105,46 @@ class _Login extends State<Login>{
 class Home extends StatefulWidget {const Home({super.key,required this.api,required this.me});final Api api;final Map<String,dynamic> me;@override State<Home> createState()=>_Home();}
 class _Home extends State<Home>{
   Api get api=>widget.api; Map<String,dynamic> get me=>widget.me;List chats=[],messages=[];Map<String,dynamic>? selected; final text=TextEditingController(),search=TextEditingController(),rec=AudioRecorder();Timer? timer;bool loading=false,recording=false,calling=false;String error='';int lastIncoming=0;bool showArchived=false;String announcement='';Map<String,dynamic>? reply;
-  @override void initState(){super.initState();refresh();timer=Timer.periodic(const Duration(seconds:2),(_)=>refresh());search.addListener(()=>setState((){}));}
+  @override void initState(){super.initState();refresh();timer=Timer.periodic(const Duration(seconds:3),(_){if(!loading&&WidgetsBinding.instance.lifecycleState==AppLifecycleState.resumed)refresh();});search.addListener(()=>setState((){}));}
   @override void dispose(){timer?.cancel();rec.dispose();text.dispose();search.dispose();super.dispose();}
   void notice(Object e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('$e')));}
-  Future<void> refresh() async{if(loading||!mounted)return;loading=true;try{final list=await api.req('/chats') as List; final ann=await api.req('/announcement'); list.sort((a,b)=>(b['favorite']??0).compareTo(a['favorite']??0));final id=selected?['id'];final more=id==null?[]:await api.req('/chats/$id/messages?recent=1') as List;if(id!=null&&more.isNotEmpty&&mounted&&selected?['id']==id)await api.req('/chats/$id/read',{'id':more.last['id']});if(mounted)setState((){chats=list;announcement=ann['text']??'';if(selected?['id']==id&&id!=null){messages=more;for(final c in list){if(c['id']==id)selected=Map<String,dynamic>.from(c);}}error='';});if(!calling){final inc=await api.req('/incoming') as List;if(inc.isNotEmpty&&inc.first['id']!=lastIncoming&&mounted){lastIncoming=inc.first['id'];incoming(inc.first);}}}catch(e){if(mounted)setState(()=>error='$e');}finally{loading=false;}}
+  DateTime lastAnnouncement=DateTime.fromMillisecondsSinceEpoch(0);
+  final readThrough=<int,int>{};
+  bool refreshPending=false;
+  Future<void> refresh() async{
+    if(!mounted)return;
+    if(loading){refreshPending=true;return;}
+    loading=true;
+    try{
+      final id=selected?['id'];
+      final requests=<Future<dynamic>>[api.req('/chats'),if(id!=null)api.req('/chats/$id/messages?recent=1'),if(!calling)api.req('/incoming')];
+      final getIncoming=!calling;
+      final getAnnouncement=DateTime.now().difference(lastAnnouncement).inSeconds>=30;
+      if(getAnnouncement)requests.add(api.req('/announcement'));
+      final results=await Future.wait(requests);
+      if(!mounted)return;
+      int pos=0;
+      final list=results[pos++] as List;
+      list.sort((a,b)=>(b['favorite']??0).compareTo(a['favorite']??0));
+      final more=id==null?null:results[pos++] as List;
+      final inc=getIncoming?results[pos++] as List:null;
+      final ann=getAnnouncement?results[pos++]:null;
+      if(getAnnouncement)lastAnnouncement=DateTime.now();
+      final sameRoom=id!=null&&selected?['id']==id;
+      Map<String,dynamic>? room;
+      if(sameRoom){for(final item in list){if(item['id']==id){room=Map<String,dynamic>.from(item);break;}}}
+      final nextAnnouncement=ann==null?announcement:(ann['text']??'').toString();
+      final changed=jsonEncode(chats)!=jsonEncode(list)||nextAnnouncement!=announcement||error.isNotEmpty||
+        (sameRoom&&(jsonEncode(messages)!=jsonEncode(more)||jsonEncode(selected)!=jsonEncode(room)));
+      if(changed)setState((){chats=list;announcement=nextAnnouncement;error='';if(sameRoom){selected=room;messages=room==null?[]:more!;}});
+      if(sameRoom&&room!=null&&more!=null&&more.isNotEmpty&&id is int){
+        final last=(more.last['id'] as num).toInt();
+        if(last>(readThrough[id]??0)){await api.req('/chats/$id/read',{'id':last});readThrough[id]=last;}
+      }
+      if(inc!=null&&inc.isNotEmpty&&!calling&&mounted&&inc.first['id']!=lastIncoming){lastIncoming=inc.first['id'];incoming(inc.first);}
+    }catch(e){if(mounted&&error!=e.toString())setState(()=>error=e.toString());}
+    finally{loading=false;if(refreshPending&&mounted){refreshPending=false;Future<void>.microtask(refresh);}}
+  }
   Future<void> choose(dynamic c) async{if(recording){notice('Сначала завершите запись');return;}setState((){final old=selected?['id'];if(old is int)drafts[old]=text.text;selected=Map<String,dynamic>.from(c);text.text=drafts[c['id']]??'';messages=[];reply=null;});await refresh();}
   Future<String?> ask(String title,String label,{String initial=''})async{final ctrl=TextEditingController(text:initial);final result=await showDialog<String>(context:context,builder:(ctx)=>AlertDialog(title:Text(title),content:TextField(controller:ctrl,autofocus:true,decoration:InputDecoration(labelText:label)),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(ctx,ctrl.text.trim()),child:const Text('OK'))]));ctrl.dispose();return result;}
   Future<void> create(String kind)async{final direct=kind=='direct';final v=await ask(direct?'Новый чат':kind=='group'?'Новая группа':'Новый канал',direct?'@username':'Название');if(v==null||v.isEmpty)return;try{final r=await api.req('/chats',{'kind':kind,(direct?'username':'title'):v});await refresh();for(final c in chats){if(c['id']==r['id']){await choose(c);break;}}}catch(e){notice(e);}}
@@ -184,7 +220,7 @@ class _Home extends State<Home>{
       sectionTitle('АККАУНТ'),ListTile(leading:const Icon(Icons.bookmark_border),title:const Text('Избранные сообщения'),onTap:saved),ListTile(leading:const Icon(Icons.lock_outline),title:const Text('Пароль'),onTap:security),ListTile(leading:const Icon(Icons.devices_outlined),title:const Text('Завершить другие сеансы'),onTap:()=>menuAction('sessions')),ListTile(leading:const Icon(Icons.block_outlined),title:const Text('Заблокированные'),onTap:blockedUsers),
       sectionTitle('ОФОРМЛЕНИЕ'),Padding(padding:const EdgeInsets.symmetric(horizontal:12),child:ValueListenableBuilder<ThemeMode>(valueListenable:themeMode,builder:(_,mode,child)=>SegmentedButton<ThemeMode>(segments:const [ButtonSegment(value:ThemeMode.system,icon:Icon(Icons.settings_brightness),label:Text('Авто')),ButtonSegment(value:ThemeMode.light,icon:Icon(Icons.light_mode_outlined),label:Text('Свет')),ButtonSegment(value:ThemeMode.dark,icon:Icon(Icons.dark_mode_outlined),label:Text('Тьма'))],selected:{mode},onSelectionChanged:(m)=>themeMode.value=m.first))),
       if(me['role']=='owner')...[sectionTitle('УПРАВЛЕНИЕ'),ListTile(leading:const Icon(Icons.admin_panel_settings_outlined),title:const Text('Панель владельца'),onTap:admin)],
-      sectionTitle('TELEZEKA'),ListTile(leading:const Icon(Icons.info_outline),title:const Text('Версия 0.4 · Studio'),subtitle:const Text('Предварительная сборка')),ListTile(leading:Icon(Icons.logout,color:c.error),title:Text('Выйти',style:TextStyle(color:c.error)),onTap:()=>menuAction('logout')),
+      sectionTitle('TELEZEKA'),ListTile(leading:const Icon(Icons.info_outline),title:const Text('Версия ${const String.fromEnvironment("TELEZEKA_VERSION",defaultValue:"0.4.1")} · Studio'),subtitle:const Text('Предварительная сборка')),ListTile(leading:Icon(Icons.logout,color:c.error),title:Text('Выйти',style:TextStyle(color:c.error)),onTap:()=>menuAction('logout')),
     ]);
   }
   Widget sidebar(){
