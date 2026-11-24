@@ -1,6 +1,9 @@
 import os, json, sqlite3, secrets, hashlib, hmac, re, time, base64, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
+from urllib.request import urlopen
+import smtplib, ssl
+from email.message import EmailMessage
 from contextlib import closing
 
 DB=os.getenv('CHAT_DB','chat.db'); INVITE=os.getenv('CHAT_INVITE',''); LIMIT=24*1024*1024
@@ -29,7 +32,7 @@ def init():
             if name not in cols: c.execute(f'ALTER TABLE messages ADD COLUMN {name} {typ}')
 
         ucols={r['name'] for r in c.execute('PRAGMA table_info(users)')}
-        for name,typ in [('role',"TEXT NOT NULL DEFAULT 'member'"),('banned','INTEGER NOT NULL DEFAULT 0'),('bio',"TEXT NOT NULL DEFAULT ''")]:
+        for name,typ in [('role',"TEXT NOT NULL DEFAULT 'member'"),('banned','INTEGER NOT NULL DEFAULT 0'),('bio',"TEXT NOT NULL DEFAULT ''"),('phone','TEXT'),('email_verified','INTEGER NOT NULL DEFAULT 0'),('phone_verified','INTEGER NOT NULL DEFAULT 0')]:
             if name not in ucols: c.execute(f'ALTER TABLE users ADD COLUMN {name} {typ}')
         c.executescript("""
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -38,6 +41,10 @@ def init():
         CREATE TABLE IF NOT EXISTS saved_messages(uid INTEGER REFERENCES users(id),message INTEGER REFERENCES messages(id),PRIMARY KEY(uid,message));
         CREATE TABLE IF NOT EXISTS blocks(uid INTEGER REFERENCES users(id),blocked INTEGER REFERENCES users(id),PRIMARY KEY(uid,blocked));
         CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY,reporter INTEGER REFERENCES users(id),message INTEGER REFERENCES messages(id),reason TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',created INTEGER NOT NULL);
+        CREATE UNIQUE INDEX IF NOT EXISTS unique_phone ON users(phone) WHERE phone IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS registration_codes(target TEXT PRIMARY KEY,digest TEXT NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS verification_sends(id INTEGER PRIMARY KEY,target TEXT NOT NULL,created INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS verification_sends_time ON verification_sends(created);
         CREATE UNIQUE INDEX IF NOT EXISTS single_owner ON users(role) WHERE role='owner';
         """)
         c.execute("INSERT OR IGNORE INTO settings VALUES('registration','open')")
@@ -98,18 +105,112 @@ def peer(c,un):
 def session(c,u):
     t=secrets.token_urlsafe(32); c.execute('INSERT INTO sessions VALUES(?,?,?)',(tokenhash(t),u,int(time.time())+30*86400)); return {'token':t,'user':public(c.execute('SELECT * FROM users WHERE id=?',(u,)).fetchone())}
 
+def contact(value):
+    raw=str(value or '').strip()
+    if '@' in raw:
+        e=raw.lower()
+        need(len(e)<=254 and re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+',e) and not e.endswith('.telezeka.invalid') and e!='zakaria@telezeka.local','Введите действительный email',400)
+        return 'email',e
+    need(re.fullmatch(r'[+0-9 ()-]{7,32}',raw),'Введите телефон в международном формате',400)
+    v=re.sub(r'[^0-9+]','',raw)
+    if len(v)==11 and v[0]=='8': v='+7'+v[1:]
+    if len(v)==11 and v[0]=='7': v='+'+v
+    need(re.fullmatch(r'\+[1-9][0-9]{7,14}',v) and (not v.startswith('+7') or len(v)==12),'Введите телефон, например +7 (978) 000 00 00',400)
+    return 'phone',v
+
+def otp_digest(kind,target,code):
+    secret=os.getenv('TELEZEKA_OTP_SECRET','')
+    need(len(secret)>=32,'Сервис подтверждения ещё не настроен',503)
+    return hmac.new(secret.encode(),f'{kind}:{target}:{code}'.encode(),hashlib.sha256).hexdigest()
+
+def deliver_code(kind,target,code):
+    message=f'Код Telezeka: {code}. Действует 5 минут. Никому не сообщайте.'
+    if kind=='email':
+        host=os.getenv('SMTP_HOST',''); user=os.getenv('SMTP_USER',''); pwd=os.getenv('SMTP_PASSWORD',''); sender=os.getenv('SMTP_FROM','')
+        need(host and sender and user and pwd,'Отправка писем ещё не настроена',503)
+        msg=EmailMessage(); msg['Subject']='Код подтверждения Telezeka'; msg['From']=sender; msg['To']=target; msg.set_content(message)
+        mode=os.getenv('SMTP_TLS','ssl'); context=ssl.create_default_context()
+        try:
+            if mode=='ssl':
+                with smtplib.SMTP_SSL(host,int(os.getenv('SMTP_PORT','465')),context=context,timeout=12) as smtp:
+                    smtp.login(user,pwd); smtp.send_message(msg)
+            elif mode=='starttls':
+                with smtplib.SMTP(host,int(os.getenv('SMTP_PORT','587')),timeout=12) as smtp:
+                    smtp.ehlo(); smtp.starttls(context=context); smtp.ehlo(); smtp.login(user,pwd); smtp.send_message(msg)
+            else: raise RuntimeError('Invalid SMTP TLS configuration')
+        except Exception: raise Err(503,'Не удалось отправить письмо. Попробуйте позже.')
+    else:
+        key=os.getenv('SMS_RU_API_ID',''); need(key,'Отправка SMS ещё не настроена',503)
+        data={'api_id':key,'to':target[1:],'msg':message,'json':'1'}
+        sender=os.getenv('SMS_RU_FROM','')
+        if sender: data['from']=sender
+        try:
+            with urlopen('https://sms.ru/sms/send?'+urlencode(data),timeout=12) as res: result=json.load(res)
+            if result.get('status')!='OK' or result.get('sms',{}).get(target[1:],{}).get('status')!='OK': raise RuntimeError('SMS rejected')
+        except Exception: raise Err(503,'Не удалось отправить SMS. Попробуйте позже.')
+
+def invite_check(c,d):
+    need(setting(c,'registration')=='open','Регистрация закрыта',403)
+    need(bool(INVITE) and hmac.compare_digest(str(d.get('invite','')),INVITE),'Неверный код приглашения')
+
+def send_registration_code(c,d,now):
+    invite_check(c,d); kind,target=contact(d.get('contact')); code=f'{secrets.randbelow(1000000):06d}'
+    digest=otp_digest(kind,target,code)
+    c.execute('BEGIN IMMEDIATE')
+    c.execute('DELETE FROM verification_sends WHERE created<?',(now-86400,))
+    c.execute('DELETE FROM registration_codes WHERE expires<?',(now-86400,))
+    need(c.execute('SELECT COUNT(*) FROM verification_sends').fetchone()[0]<100,'Дневной лимит кодов исчерпан',429)
+    need(c.execute('SELECT COUNT(*) FROM verification_sends WHERE target=?',(target,)).fetchone()[0]<5,'Дневной лимит кодов исчерпан',429)
+    last=c.execute('SELECT MAX(created) FROM verification_sends WHERE target=?',(target,)).fetchone()[0]
+    need(last is None or now-last>=60,'Повторная отправка через 60 секунд',429)
+    c.execute('INSERT INTO verification_sends(target,created) VALUES(?,?)',(target,now))
+    c.execute('INSERT INTO registration_codes(target,digest,created,expires,attempts) VALUES(?,?,?,?,0) ON CONFLICT(target) DO UPDATE SET digest=excluded.digest,created=excluded.created,expires=excluded.expires,attempts=0',(target,digest,now,now+300))
+    c.commit()
+    try: deliver_code(kind,target,code)
+    except Exception:
+        c.execute('DELETE FROM registration_codes WHERE target=? AND digest=?',(target,digest)); c.commit(); raise
+    return {'ok':True,'expires_in':300,'resend_after':60}
+
+def check_registration_code(c,kind,target,code,now):
+    r=c.execute('SELECT * FROM registration_codes WHERE target=?',(target,)).fetchone()
+    need(r and r['expires']>=now and r['attempts']<5,'Код истёк или исчерпаны попытки. Запросите новый.',400)
+    if not re.fullmatch(r'[0-9]{6}',str(code or '')) or not hmac.compare_digest(r['digest'],otp_digest(kind,target,str(code))):
+        c.execute('UPDATE registration_codes SET attempts=attempts+1 WHERE target=?',(target,)); c.commit()
+        raise Err(400,'Неверный код')
+    c.execute('DELETE FROM registration_codes WHERE target=?',(target,))
+
 def run(c,method,path,q,d,auth):
     now=int(time.time()); route=path.strip('/').split('/')
     if path=='/health': return {'ok':True}
+    if method=='POST' and path=='/auth/send-code': return send_registration_code(c,d,now)
     if method=='POST' and path in ('/register','/login'):
-        e=clean(d.get('email'),254).lower(); p=str(d.get('password','')); need(3<=len(e) and '@' in e and 8<=len(p)<=256,'Проверьте email и пароль (от 8 символов)',400)
+        p=str(d.get('password','')); need(8<=len(p)<=256,'Пароль: от 8 символов',400)
+        raw=str(d.get('contact') or d.get('email') or '').strip()
         if path=='/register':
-            need(setting(c,'registration')=='open','Регистрация закрыта',403)
-            need(e!='zakaria@telezeka.local' and username(d.get('username'))!='zakaria','Имя зарезервировано',409)
-            need(bool(INVITE) and hmac.compare_digest(str(d.get('invite','')),INVITE),'Неверный код приглашения'); n=clean(d.get('name')); need(n,'Укажите имя',400); s=secrets.token_hex(16)
-            u=c.execute('INSERT INTO users(name,username,email,salt,hash) VALUES(?,?,?,?,?)',(n,username(d.get('username')),e,s,password(p,s))).lastrowid
+            invite_check(c,d)
+            kind,target=contact(raw); un=username(d.get('username'))
+            need(un!='zakaria','Имя зарезервировано',409)
+            n=clean(d.get('name')); need(n,'Укажите имя',400)
+            other_raw=str(d.get('second_contact') or '').strip()
+            other_kind,other_target=contact(other_raw) if other_raw else (None,None)
+            need(other_kind is None or other_kind!=kind,'Укажите email и телефон, а не два одинаковых способа',400)
+            email=target if kind=='email' else other_target if other_kind=='email' else None
+            phone=target if kind=='phone' else other_target if other_kind=='phone' else None
+            c.execute('BEGIN IMMEDIATE')
+            check_registration_code(c,kind,target,d.get('code'),now)
+            if other_kind: check_registration_code(c,other_kind,other_target,d.get('second_code'),now)
+            salt=secrets.token_hex(16)
+            stored_email=email or secrets.token_hex(24)+'@phone.telezeka.invalid'
+            u=c.execute('INSERT INTO users(name,username,email,salt,hash,phone,email_verified,phone_verified) VALUES(?,?,?,?,?,?,?,?)',(n,un,stored_email,salt,password(p,salt),phone,int(email is not None),int(phone is not None))).lastrowid
         else:
-            r=c.execute('SELECT * FROM users WHERE email=?',(e,)).fetchone(); actual=password(p,r['salt'] if r else '0'*32); need(r and hmac.compare_digest(actual,r['hash']),'Неверный email или пароль',401); need(not r['banned'],'Аккаунт заблокирован',403); u=r['id']
+            if raw.lower()=='zakaria@telezeka.local' or raw.lower()=='@zakaria':
+                r=c.execute("SELECT * FROM users WHERE role='owner'").fetchone()
+            else:
+                kind,target=contact(raw)
+                r=c.execute('SELECT * FROM users WHERE '+('phone' if kind=='phone' else 'email')+'=?',(target,)).fetchone()
+            actual=password(p,r['salt'] if r else '0'*32)
+            need(r and hmac.compare_digest(actual,r['hash']),'Неверный логин или пароль',401)
+            need(not r['banned'],'Аккаунт заблокирован',403); u=r['id']
         return session(c,u)
     t=auth.removeprefix('Bearer '); r=c.execute('SELECT sessions.uid,users.role FROM sessions JOIN users ON sessions.uid=users.id WHERE token=? AND expires>? AND users.banned=0',(tokenhash(t),now)).fetchone(); need(r,'Войдите в аккаунт',401); u=r['uid']
     role=r['role']
@@ -286,7 +387,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed=urlparse(self.path); d={}; size=int(self.headers.get('Content-Length','0')); need(0<=size<=LIMIT,'Слишком большой запрос',413)
             if size: d=json.loads(self.rfile.read(size)); need(isinstance(d,dict),'Некорректный запрос',400)
-            if method=='POST' and parsed.path in ('/register','/login'): check_auth_limit(d.get('email'))
+            if method=='POST' and parsed.path in ('/register','/login','/auth/send-code'): check_auth_limit(d.get('contact') or d.get('email'))
             with closing(db()) as c,c: result=run(c,method,parsed.path,parse_qs(parsed.query),d,self.headers.get('Authorization',''))
             self.reply(200,result)
         except Err as e:self.reply(e.status,{'error':e.msg})
