@@ -1,0 +1,93 @@
+name: Build and publish Telezeka MSI
+on:
+  push:
+    branches: [main]
+    paths:
+      - installer/**
+      - .github/workflows/msi.yml
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Build Telezeka"]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: telezeka-msi-${{ github.event.workflow_run.id || 'preview' }}
+  cancel-in-progress: false
+jobs:
+  msi:
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.conclusion != 'cancelled') }}
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id || '45375312782' }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_run' && format('v0.3.0-preview.{0}', github.event.workflow_run.run_number) || 'v0.2.0-preview' }}
+      MSI_VERSION: ${{ github.event_name == 'workflow_run' && format('0.3.{0}', github.event.workflow_run.run_number) || '0.2.0' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Download compiled Windows application
+        uses: actions/download-artifact@v4
+        with:
+          name: telezeka-windows
+          run-id: ${{ env.SOURCE_RUN }}
+          github-token: ${{ github.token }}
+          path: windows-app
+      - name: Install WiX and graphics tools
+        shell: pwsh
+        run: |
+          python -m pip install Pillow==11.3.0
+          if ($LASTEXITCODE -ne 0) { throw 'Pillow installation failed' }
+          dotnet tool install --global wix --version 4.0.6
+          if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed' }
+          wix extension add -g WixToolset.UI.wixext/4.0.6
+          if ($LASTEXITCODE -ne 0) { throw 'WiX UI extension installation failed' }
+      - name: Compile native MSI
+        shell: pwsh
+        run: |
+          python installer/build_msi.py --source windows-app --output dist/Telezeka-x64.msi --version "$env:MSI_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'MSI compilation failed' }
+      - name: Test silent install and uninstall
+        shell: pwsh
+        run: |
+          $msi = (Resolve-Path 'dist/Telezeka-x64.msi').Path
+          $log = Join-Path $PWD 'install.log'
+          $unlog = Join-Path $PWD 'uninstall.log'
+          $p = Start-Process msiexec.exe -ArgumentList "/i ""$msi"" /qn /norestart /l*v ""$log""" -Wait -PassThru
+          if ($p.ExitCode -notin @(0,3010)) { throw "MSI installation failed: $($p.ExitCode)" }
+          $app = Join-Path $env:ProgramFiles 'Telezeka'
+          foreach ($f in @('telezeka.exe','flutter_windows.dll','data\icudtl.dat')) {
+            if (!(Test-Path (Join-Path $app $f))) { throw "Missing installed file: $f" }
+          }
+          $p = Start-Process msiexec.exe -ArgumentList "/x ""$msi"" /qn /norestart /l*v ""$unlog""" -Wait -PassThru
+          if ($p.ExitCode -notin @(0,3010)) { throw "MSI uninstall failed: $($p.ExitCode)" }
+          if (Test-Path (Join-Path $app 'telezeka.exe')) { throw 'Executable remains after uninstall' }
+      - name: Save installer and test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telezeka-MSI
+          path: |
+            dist/Telezeka-x64.msi
+            dist/msi-work/banner.bmp
+            dist/msi-work/dialog.bmp
+            install.log
+            uninstall.log
+          if-no-files-found: warn
+      - name: Publish MSI to existing release
+        shell: pwsh
+        run: |
+          gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" *> $null
+          if ($LASTEXITCODE -ne 0) { throw "Release $env:RELEASE_TAG does not exist yet; MSI retained in Actions artifacts" }
+          gh release upload "$env:RELEASE_TAG" dist/Telezeka-x64.msi --repo "$env:GITHUB_REPOSITORY" --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed; MSI retained in artifacts' }
