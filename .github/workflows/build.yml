@@ -1,165 +1,57 @@
-name: Build Telezeka
+name: iOS unsigned release
 on:
-  workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - client/**
       - scripts/prepare.py
-      - scripts/fix_android_jvm.py
       - .github/workflows/build.yml
+  workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 concurrency:
-  group: telezeka-build-${{ github.ref }}
-  cancel-in-progress: true
+  group: telezeka-ios-current
+  cancel-in-progress: false
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: android
-          - os: windows-latest
-            target: windows
-          - os: macos-latest
-            target: ios
-    runs-on: ${{ matrix.os }}
+  ios:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/setup-java@v4
-        if: matrix.target == 'android'
-        with:
-          distribution: temurin
-          java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.50.1'
           channel: stable
           cache: true
       - run: python scripts/prepare.py
       - run: flutter pub get
         working-directory: build_app
-      - run: python scripts/fix_android_jvm.py
-        if: matrix.target == 'android'
       - run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/main.dart
         working-directory: build_app
-      - run: flutter build apk --release
-        if: matrix.target == 'android'
+      - run: flutter build ios --release --no-codesign --build-name=0.4.1 --build-number=${{ github.run_number }} --dart-define=TELEZEKA_VERSION=0.4.1
         working-directory: build_app
-      - run: flutter build windows --release
-        if: matrix.target == 'windows'
-        working-directory: build_app
-      - run: flutter build ios --release --no-codesign
-        if: matrix.target == 'ios'
-        working-directory: build_app
-      - name: Package Android
-        if: matrix.target == 'android'
+      - name: Package unsigned IPA
         run: |
-          mkdir -p release-assets
-          cp build_app/build/app/outputs/flutter-apk/app-release.apk release-assets/Telezeka-Android.apk
-      - name: Package Windows
-        if: matrix.target == 'windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force release-assets | Out-Null
-          $app = "build_app/build/windows/x64/runner/Release"
-          if (!(Test-Path "$app/telezeka.exe")) { throw 'Windows executable missing' }
-          Compress-Archive -Path "$app/*" -DestinationPath release-assets/Telezeka-Windows.zip -Force
-      - name: Compile Windows installer
-        if: matrix.target == 'windows'
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (!(Test-Path $iscc)) {
-            choco install innosetup -y --no-progress
-            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
-          }
-          @'
-          [Setup]
-          AppId=Telezeka
-          AppName=Telezeka
-          AppVersion=0.3.0
-          DefaultDirName={localappdata}\Programs\Telezeka
-          DefaultGroupName=Telezeka
-          PrivilegesRequired=lowest
-          OutputDir=release-assets
-          OutputBaseFilename=Telezeka-Setup
-          Compression=lzma2
-          SolidCompression=yes
-          [Files]
-          Source: "build_app\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-          [Icons]
-          Name: "{group}\Telezeka"; Filename: "{app}\telezeka.exe"
-          [Run]
-          Filename: "{app}\telezeka.exe"; Description: "Launch Telezeka"; Flags: nowait postinstall skipifsilent
-          '@ | Set-Content -Encoding utf8 installer.iss
-          & $iscc installer.iss
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path 'release-assets/Telezeka-Setup.exe')) { throw 'Installer compilation failed' }
-      - name: Package unsigned iOS archive
-        if: matrix.target == 'ios'
-        run: |
-          mkdir -p release-assets ios-package/Payload
+          mkdir -p dist ios-package/Payload
           ditto build_app/build/ios/iphoneos/Runner.app ios-package/Payload/Runner.app
-          (cd ios-package && ditto -c -k --sequesterRsrc --keepParent Payload ../release-assets/Telezeka-iOS-unsigned.ipa)
+          (cd ios-package && ditto -c -k --sequesterRsrc --keepParent Payload ../dist/Telezeka-iOS-unsigned.ipa)
+          (cd dist && shasum -a 256 Telezeka-iOS-unsigned.ipa > SHA256SUMS.txt)
+          printf '%s\n' "$GITHUB_SHA" > dist/build-commit.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.target }}
-          path: release-assets/*
+          name: Telezeka-iOS-unsigned
+          path: dist/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: matrix.target == 'android'
-        with:
-          name: telezeka-android
-          path: build_app/build/app/outputs/flutter-apk/app-release.apk
-      - uses: actions/upload-artifact@v4
-        if: matrix.target == 'windows'
-        with:
-          name: telezeka-windows
-          path: build_app/build/windows/x64/runner/Release/
-      - uses: actions/upload-artifact@v4
-        if: matrix.target == 'ios'
-        with:
-          name: telezeka-ios-unsigned
-          path: build_app/build/ios/iphoneos/Runner.app/
-
-  publish:
-    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/main' }}
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: release-*
-          path: release-assets
-          merge-multiple: true
-      - name: Publish available binaries to GitHub Releases
+      - name: Publish unsigned iOS preview
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-          assets=(release-assets/*.exe release-assets/*.apk release-assets/*.zip release-assets/*.ipa)
-          if (( ${#assets[@]} == 0 )); then
-            echo 'No successfully compiled assets; no release created.'
-            exit 1
-          fi
-          tag="v0.3.0-preview.${GITHUB_RUN_NUMBER}"
-          printf '%s\n' 'Experimental Telezeka build. A working HTTPS backend is required.' \
-            'Windows: unsigned installer or complete portable ZIP. Android: test-signed APK.' \
-            'iOS: unsigned IPA is NOT installable until signed by Apple.' \
-            'Only successfully compiled platforms are attached; missing assets indicate a build or packaging failure.' \
-            'Not production-ready; do not use for sensitive communication.' > release-notes.txt
-          sha256sum "${assets[@]}" | sed 's#release-assets/##' > release-assets/SHA256SUMS.txt
+          set -e
+          tag="v0.4.1-ios.${GITHUB_RUN_NUMBER}"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" "${assets[@]}" release-assets/SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" "${assets[@]}" release-assets/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Telezeka 0.3 preview ${GITHUB_RUN_NUMBER}" --notes-file release-notes.txt
+            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Telezeka 0.4.1 iOS (unsigned)" --notes "Unsigned IPA: Apple signing and a suitable provisioning profile are required before installation. Experimental software; server deployment required."
           fi
