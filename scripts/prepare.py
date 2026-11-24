@@ -36,7 +36,8 @@ mark=Image.open(BytesIO(base64.b64decode((src/'assets/brand.png.b64').read_text(
 assets=dst/'assets'; assets.mkdir(exist_ok=True)
 def icon(size,opaque=False):
     canvas=Image.new('RGBA',(size,size),'#064637' if opaque else (0,0,0,0))
-    m=mark.copy(); m.thumbnail((int(size*.86),int(size*.86)))
+    factor=int(size*.86)/max(mark.size)
+    m=mark.resize((max(1,round(mark.width*factor)),max(1,round(mark.height*factor))),Image.Resampling.LANCZOS)
     canvas.alpha_composite(m,((size-m.width)//2,(size-m.height)//2))
     return canvas.convert('RGB') if opaque else canvas
 icon(256).save(assets/'brand.png')
