@@ -69,9 +69,14 @@ jobs:
           python installer/build_msi.py --source windows-app --output dist/Telezeka-x64.msi --version "$env:VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'MSI failed' }
           $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-          & $csc /nologo /target:winexe /platform:x64 /optimize+ /reference:System.Windows.Forms.dll /win32icon:dist/msi-work/telezeka.ico /resource:dist/Telezeka-x64.msi,Telezeka.Payload /out:dist/Telezeka-Setup.exe installer/SetupBootstrap.cs
+          $source = (Resolve-Path 'installer/SetupBootstrap.cs').Path
+          $icon = (Resolve-Path 'dist/msi-work/telezeka.ico').Path
+          $msi = (Resolve-Path 'dist/Telezeka-x64.msi').Path
+          $output = Join-Path (Resolve-Path 'dist').Path 'Telezeka-Setup.exe'
+          $compilerArgs = @('/nologo','/target:winexe','/platform:x64','/optimize+','/reference:System.Windows.Forms.dll',"/win32icon:$icon","/resource:$msi,Telezeka.Payload","/out:$output",$source)
+          & $csc @compilerArgs
           if ($LASTEXITCODE -ne 0) { throw 'EXE bootstrap failed' }
-          $assembly = [Reflection.Assembly]::LoadFile((Resolve-Path 'dist/Telezeka-Setup.exe').Path)
+          $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Resolve-Path 'dist/Telezeka-Setup.exe').Path))
           $stream = $assembly.GetManifestResourceStream('Telezeka.Payload')
           if (!$stream) { throw 'EXE missing MSI payload' }
           $sha = [Security.Cryptography.SHA256]::Create()
