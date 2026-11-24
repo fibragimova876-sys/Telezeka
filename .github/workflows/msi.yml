@@ -24,7 +24,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       SOURCE_RUN: ${{ github.event.workflow_run.id || '45375312782' }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_run' && format('v0.3.0-preview.{0}', github.event.workflow_run.run_number) || 'v0.2.0-preview' }}
-      MSI_VERSION: ${{ github.event_name == 'workflow_run' && format('0.3.{0}', github.event.workflow_run.run_number) || '0.2.0' }}
+      MSI_VERSION: ${{ github.event_name == 'workflow_run' && format('0.3.{0}', github.event.workflow_run.run_number) || '0.3.0' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,6 +57,25 @@ jobs:
         run: |
           python installer/build_msi.py --source windows-app --output dist/Telezeka-x64.msi --version "$env:MSI_VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'MSI compilation failed' }
+      - name: Download previous published MSI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force previous | Out-Null
+          gh release download v0.2.0-preview --repo "$env:GITHUB_REPOSITORY" --pattern Telezeka-x64.msi --dir previous
+          if ($LASTEXITCODE -ne 0) { throw 'Previous MSI missing' }
+      - name: Verify major upgrade removes old MSI
+        shell: pwsh
+        run: |
+          $old=(Resolve-Path 'previous/Telezeka-x64.msi').Path
+          $p=Start-Process msiexec.exe -ArgumentList "/i ""$old"" /qn /norestart" -Wait -PassThru
+          if ($p.ExitCode -notin @(0,3010)) { throw "Old installation failed: $($p.ExitCode)" }
+          $installer=New-Object -ComObject WindowsInstaller.Installer
+          $db=$installer.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$installer,@($old,0))
+          $view=$db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@("SELECT Value FROM Property WHERE Property='ProductCode'"))
+          $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null) | Out-Null
+          $record=$view.GetType().InvokeMember('Fetch','InvokeMethod',$null,$view,$null)
+          $code=$record.GetType().InvokeMember('StringData','GetProperty',$null,$record,@(1))
+          Set-Content -Path old-product.txt -Value $code
       - name: Test silent install and uninstall
         shell: pwsh
         run: |
@@ -65,6 +84,10 @@ jobs:
           $unlog = Join-Path $PWD 'uninstall.log'
           $p = Start-Process msiexec.exe -ArgumentList "/i ""$msi"" /qn /norestart /l*v ""$log""" -Wait -PassThru
           if ($p.ExitCode -notin @(0,3010)) { throw "MSI installation failed: $($p.ExitCode)" }
+          $code = (Get-Content old-product.txt).Trim()
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $state = $installer.GetType().InvokeMember('ProductState','GetProperty',$null,$installer,@($code))
+          if ($state -eq 5) { throw 'Old MSI is still installed' }
           $app = Join-Path $env:ProgramFiles 'Telezeka'
           foreach ($f in @('telezeka.exe','flutter_windows.dll','data\icudtl.dat')) {
             if (!(Test-Path (Join-Path $app $f))) { throw "Missing installed file: $f" }
@@ -85,6 +108,7 @@ jobs:
             uninstall.log
           if-no-files-found: warn
       - name: Publish MSI to existing release
+        if: github.event_name == 'workflow_run'
         shell: pwsh
         run: |
           gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" *> $null
