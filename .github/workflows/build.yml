@@ -1,0 +1,66 @@
+name: Build Telezeka
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - client/**
+      - scripts/prepare.py
+      - .github/workflows/build.yml
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: android
+          - os: windows-latest
+            target: windows
+          - os: macos-latest
+            target: ios
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        if: matrix.target == 'android'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: python scripts/prepare.py
+      - run: flutter pub get
+        working-directory: build_app
+      - run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/main.dart
+        working-directory: build_app
+      - run: flutter build apk --release
+        if: matrix.target == 'android'
+        working-directory: build_app
+      - run: flutter build windows --release
+        if: matrix.target == 'windows'
+        working-directory: build_app
+      - run: flutter build ios --release --no-codesign
+        if: matrix.target == 'ios'
+        working-directory: build_app
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'android'
+        with:
+          name: telezeka-android
+          path: build_app/build/app/outputs/flutter-apk/app-release.apk
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'windows'
+        with:
+          name: telezeka-windows
+          path: build_app/build/windows/x64/runner/Release/
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'ios'
+        with:
+          name: telezeka-ios-unsigned
+          path: build_app/build/ios/iphoneos/Runner.app/
