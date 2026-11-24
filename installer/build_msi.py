@@ -15,31 +15,31 @@ def font(size,bold=False):
     return ImageFont.truetype(str(Path(os.environ["WINDIR"])/"Fonts"/("segoeuib.ttf" if bold else "segoeui.ttf")),size)
 def logo(draw,cx,cy,scale=1):
     def pt(x,y): return (round(cx+x*scale),round(cy+y*scale))
-    draw.rounded_rectangle([pt(-27,-27),pt(27,27)],radius=round(13*scale),fill="#1686BE")
+    draw.rounded_rectangle([pt(-27,-27),pt(27,27)],radius=round(13*scale),fill="#376B60")
     draw.polygon([pt(-15,-3),pt(17,-14),pt(10,16),pt(2,7),pt(-6,12),pt(-4,3)],fill="#FFFFFF")
     draw.line([pt(-4,3),pt(10,-6),pt(2,7)],fill="#B7E2F5",width=max(1,round(2*scale)))
 def brand(out):
     b=Image.new("RGB",(493,58),"#FFFFFF"); d=ImageDraw.Draw(b)
     d.rectangle((0,55,493,57),fill="#1686BE")
-    logo(d,355,27,.48); d.text((376,12),"Telezeka",font=font(19,True),fill="#172B42")
+    logo(d,355,27,.48); d.text((376,12),"Telezeka",font=font(19,True),fill="#193D35")
     d.text((377,35),"WINDOWS SETUP",font=font(8),fill="#63798F")
     b.save(out/"banner.bmp")
     b=Image.new("RGB",(493,312),"#FFFFFF");d=ImageDraw.Draw(b)
-    d.rectangle((0,0,163,312),fill="#112C45")
-    d.ellipse((-105,163,176,444),outline="#254B66",width=1)
-    d.ellipse((-88,185,158,431),outline="#254B66",width=1)
+    d.rectangle((0,0,163,312),fill="#142C29")
+    d.ellipse((-105,163,176,444),outline="#34534D",width=1)
+    d.ellipse((-88,185,158,431),outline="#34534D",width=1)
     d.rectangle((0,0,163,5),fill="#1686BE")
     logo(d,82,87,1.2)
     d.text((82,133),"Telezeka",anchor="mt",font=font(24,True),fill="#FFFFFF")
-    d.text((82,169),"GLOBAL",anchor="mt",font=font(12),fill="#8DC9E7")
+    d.text((82,169),"GLOBAL",anchor="mt",font=font(12),fill="#B0D8C6")
     d.line((26,258,137,258),fill="#34546B",width=1)
-    d.text((82,271),"WINDOWS",anchor="mt",font=font(10),fill="#B3CDDC")
+    d.text((82,271),"WINDOWS",anchor="mt",font=font(10),fill="#C3D6CE")
     b.save(out/"dialog.bmp")
     i=Image.new("RGBA",(256,256),(0,0,0,0));logo(ImageDraw.Draw(i),128,128,4.4)
     i.save(out/"telezeka.ico",sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
     def rtf(t):
         return "".join(ch if ord(ch)<128 and ch not in "\\{}" else "\\u"+str(ord(ch))+"?" for ch in t)
-    terms=["Telezeka — предварительная версия","Установка добавляет приложение Telezeka и ярлык в меню «Пуск».","Для работы требуется доступный HTTPS-сервер. Эта тестовая сборка не предназначена для конфиденциальной переписки.","Установщик и приложение могут не иметь цифровой подписи. Устанавливайте только файлы из официального репозитория Telezeka.","Продолжая установку, вы подтверждаете, что ознакомились с условиями тестирования."]
+    terms=["Telezeka — предварительная версия","Установка обновляет предыдущую MSI-версию Telezeka, удаляет её старые файлы и добавляет ярлык в меню «Пуск». Аккаунты и переписка на сервере не удаляются.","Для работы требуется доступный HTTPS-сервер. Эта тестовая сборка не предназначена для конфиденциальной переписки.","Установщик и приложение могут не иметь цифровой подписи. Устанавливайте только файлы из официального репозитория Telezeka.","Продолжая установку, вы подтверждаете, что ознакомились с условиями тестирования."]
     (out/"notice.rtf").write_text(r"{\rtf1\ansi\deff0{\fonttbl{\f0 Segoe UI;}}\fs20 "+r"\par ".join(rtf(t) for t in terms)+"}",encoding="ascii")
 def main():
     p=argparse.ArgumentParser()
@@ -54,7 +54,13 @@ def main():
     brand(work)
     root=E.Element("{"+WIX+"}Wix")
     pkg=node(root,"Package",Name="Telezeka",Manufacturer="Telezeka",Version=a.version,UpgradeCode="D94688F4-10AE-47DC-B2D6-E24A30AA94B2",Scope="perMachine",Language="1049",InstallerVersion="500")
-    node(pkg,"MajorUpgrade",DowngradeErrorMessage="Уже установлена более новая версия Telezeka.")
+    node(pkg,"MajorUpgrade",Schedule="afterInstallInitialize",MigrateFeatures="yes",DowngradeErrorMessage="Уже установлена более новая версия Telezeka.")
+    # Older EXE editions are per-user Inno Setup installations, not MSI products.
+    # Detect them rather than executing a user-writable uninstaller with elevated rights.
+    for prop,app_id in [("LEGACY_PREVIEW","TelezekaPreview"),("LEGACY_EXE","Telezeka")]:
+        property_node=node(pkg,"Property",Id=prop,Secure="yes")
+        node(property_node,"RegistrySearch",Id=prop+"Search",Root="HKCU",Key=r"Software\Microsoft\Windows\CurrentVersion\Uninstall\"+app_id+"_is1",Name="UninstallString",Type="raw",Bitness="always32")
+    node(pkg,"Launch",Condition="Installed OR (NOT LEGACY_PREVIEW AND NOT LEGACY_EXE)",Message="Обнаружена старая EXE-версия Telezeka. Удалите её через Параметры Windows — Приложения, затем запустите MSI снова. Переписка на сервере сохранится.")
     node(pkg,"MediaTemplate",EmbedCab="yes")
     node(pkg,"Icon",Id="TelezekaIcon",SourceFile=work/"telezeka.ico")
     node(pkg,"Property",Id="ARPPRODUCTICON",Value="TelezekaIcon")
