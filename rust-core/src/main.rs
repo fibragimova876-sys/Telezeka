@@ -1,4 +1,4 @@
-use axum::{body::{Body,to_bytes},extract::{Request,State},http::{Method,StatusCode,header},response::{IntoResponse,Response},Router};
+use axum::{body::{Body,to_bytes},extract::{Request,State},http::{Method,StatusCode,HeaderMap,Uri,header},response::{IntoResponse,Response},Router};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use sqlx::{SqlitePool,Sqlite,Transaction,sqlite::{SqliteConnectOptions,SqlitePoolOptions}};
@@ -11,8 +11,8 @@ fn unauthorized()->(StatusCode,&'static str){(StatusCode::UNAUTHORIZED,"Войд
 fn forbidden()->(StatusCode,&'static str){(StatusCode::FORBIDDEN,"Нет доступа")}
 fn error(e:(StatusCode,&'static str))->Response{(e.0,[(header::CACHE_CONTROL,"no-store")],axum::Json(json!({"error":e.1}))).into_response()}
 fn now()->i64{SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64}
-async fn auth(tx:&mut Transaction<'_,Sqlite>,req:&Request)->ApiResult<i64>{
-    let token=req.headers().get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()).and_then(|v|v.strip_prefix("Bearer ")).filter(|v|!v.is_empty()&&v.len()<=256).ok_or_else(unauthorized)?;
+async fn auth(tx:&mut Transaction<'_,Sqlite>,headers:&HeaderMap)->ApiResult<i64>{
+    let token=headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()).and_then(|v|v.strip_prefix("Bearer ")).filter(|v|!v.is_empty()&&v.len()<=256).ok_or_else(unauthorized)?;
     let hash=hex::encode(Sha256::digest(token.as_bytes()));
     sqlx::query_scalar::<_,i64>("SELECT sessions.uid FROM sessions JOIN users ON users.id=sessions.uid WHERE token=? AND expires>? AND users.banned=0")
        .bind(hash).bind(now()).fetch_optional(&mut **tx).await.map_err(internal)?.ok_or_else(unauthorized)
@@ -38,14 +38,14 @@ ORDER BY CASE WHEN ?3=2 THEN m.id END ASC,CASE WHEN ?3<>2 THEN m.id END DESC LIM
 fn parse_rows(rows:Vec<String>)->ApiResult<Value>{
     rows.into_iter().map(|s|serde_json::from_str::<Value>(&s).map_err(|_|(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))).collect::<ApiResult<Vec<_>>>().map(Value::Array)
 }
-async fn native(app:&App,req:&Request)->ApiResult<Option<Value>>{
-    if req.method()!=Method::GET{return Ok(None)}
-    let path=req.uri().path();
+async fn native(app:&App,method:&Method,uri:&Uri,headers:&HeaderMap)->ApiResult<Option<Value>>{
+    if *method!=Method::GET{return Ok(None)}
+    let path=uri.path();
     let parts:Vec<&str>=path.trim_matches('/').split('/').collect();
     let messages=parts.len()==3&&parts[0]=="chats"&&parts[2]=="messages";
     if !matches!(path,"/chats"|"/announcement"|"/incoming")&&!messages{return Ok(None)}
     let mut tx=app.db.begin().await.map_err(internal)?;
-    let uid=auth(&mut tx,req).await?;
+    let uid=auth(&mut tx,headers).await?;
     let result=if path=="/chats"{
         parse_rows(sqlx::query_scalar::<_,String>(CHATS).bind(uid).fetch_all(&mut *tx).await.map_err(internal)?)?
     }else if path=="/announcement"{
@@ -58,7 +58,7 @@ async fn native(app:&App,req:&Request)->ApiResult<Option<Value>>{
         let chat=parts[1].parse::<i64>().map_err(|_|bad)?;
         let ok=sqlx::query_scalar::<_,i64>("SELECT 1 FROM members WHERE chat=? AND uid=?").bind(chat).bind(uid).fetch_optional(&mut *tx).await.map_err(internal)?;
         if ok.is_none(){return Err(forbidden())}
-        let q:Vec<(String,String)>=req.uri().query().unwrap_or("").split('&').filter(|x|!x.is_empty()).map(|s|{let(k,v)=s.split_once('=').unwrap_or((s,""));(k.to_owned(),v.to_owned())}).collect();
+        let q:Vec<(String,String)>=uri.query().unwrap_or("").split('&').filter(|x|!x.is_empty()).map(|s|{let(k,v)=s.split_once('=').unwrap_or((s,""));(k.to_owned(),v.to_owned())}).collect();
         let (mode,bound,limit)=if q.iter().any(|(k,_)|k=="recent"){(0_i64,0_i64,200_i64)}else if let Some((_,v))=q.iter().find(|(k,_)|k=="before"){(1,v.parse::<i64>().map_err(|_|bad)?,200)}else{(2,q.iter().find(|(k,_)|k=="after").map(|(_,v)|v.parse::<i64>()).transpose().map_err(|_|bad)?.unwrap_or(0),100)};
         let mut rows=sqlx::query_scalar::<_,String>(MESSAGES).bind(uid).bind(chat).bind(mode).bind(bound).bind(limit).fetch_all(&mut *tx).await.map_err(internal)?;
         if mode!=2{rows.reverse();}
@@ -68,7 +68,8 @@ async fn native(app:&App,req:&Request)->ApiResult<Option<Value>>{
     Ok(Some(result))
 }
 async fn dispatch(State(app):State<App>,req:Request)->Response{
-    match native(&app,&req).await{
+    let method=req.method().clone();let uri=req.uri().clone();let headers=req.headers().clone();
+    match native(&app,&method,&uri,&headers).await{
         Ok(Some(v))=>return ([(header::CACHE_CONTROL,"no-store")],axum::Json(v)).into_response(),
         Err(e)=>return error(e),
         _=>{}
