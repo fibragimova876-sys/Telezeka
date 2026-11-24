@@ -18,7 +18,7 @@ jobs:
     runs-on: windows-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      VERSION: 0.4.${{ github.run_number }}
+      VERSION: 0.5.${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,7 +87,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force previous | Out-Null
-          gh release download v0.2.0-preview --repo "$env:GITHUB_REPOSITORY" --pattern Telezeka-x64.msi --dir previous
+          gh release download v0.4.2-windows --repo "$env:GITHUB_REPOSITORY" --pattern Telezeka-x64.msi --dir previous
           if ($LASTEXITCODE -ne 0) { throw 'Old MSI download failed' }
           $old=(Resolve-Path 'previous/Telezeka-x64.msi').Path
           $new=(Resolve-Path 'dist/Telezeka-x64.msi').Path
@@ -133,7 +133,7 @@ jobs:
           $assets=@('Telezeka-Setup.exe','Telezeka-x64.msi','Telezeka-Windows.zip','build-info.json')
           $assets | ForEach-Object { "$((Get-FileHash "dist/$_").Hash.ToLower())  $_" } | Set-Content -Encoding ascii dist/SHA256SUMS.txt
           $tag="v$env:VERSION-windows"
-          $notes="Windows preview $env:VERSION; commit $env:GITHUB_SHA. EXE contains the identical MSI. Upgrade from v0.2 tested. Server deployment still required. Unsigned test software."
+          $notes="Windows preview $env:VERSION; commit $env:GITHUB_SHA. EXE contains the identical MSI. Upgrade from v0.4.2 tested. Server deployment still required. Unsigned test software."
           $paths=@($assets | ForEach-Object {"dist/$_"}) + @('dist/SHA256SUMS.txt')
           gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null
           if ($LASTEXITCODE -ne 0) {

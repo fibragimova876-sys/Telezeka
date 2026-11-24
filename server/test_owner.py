@@ -94,4 +94,21 @@ class Permissions(unittest.TestCase):
         file_id=self.call('POST',f'/chats/{source}/messages',{'kind':'file','filename':'hello.txt','body':'aGVsbG8='},u)['id']
         self.assertEqual(self.call('GET',f'/chats/{source}/files',token=u)[0]['id'],file_id)
         with self.assertRaises(s.Err): self.call('GET',f'/chats/{source}/files',token=admin)
+    def test_notes_discovery_and_global_search(self):
+        u=self.member['token']; a=self.owner['token']
+        note=self.call('POST','/notes',{'body':'Private shopping list'},u)['id']
+        self.assertEqual(self.call('GET','/notes',token=u)[0]['id'],note)
+        self.assertEqual(self.call('GET','/notes',token=a),[])
+        with self.assertRaises(s.Err): self.call('POST','/notes/delete',{'id':note},a)
+        self.call('POST','/notes/delete',{'id':note},u)
+        ch=self.call('POST','/chats',{'kind':'group','title':'Private'},u)['id']
+        self.call('POST',f'/chats/{ch}/messages',{'kind':'text','body':'Unique search phrase'},u)
+        with closing(s.db()) as c,c:
+            rows=s.run(c,'GET','/search',{'q':['Unique search']},{},'Bearer '+u)
+            self.assertEqual(rows[0]['chat'],ch)
+            self.assertEqual(s.run(c,'GET','/search',{'q':['Unique search']},{},'Bearer '+a),[])
+            users=s.run(c,'GET','/discover',{'q':['member1']},{},'Bearer '+a)
+            self.assertEqual(users[0]['username'],'member1')
+            self.assertNotIn('email',users[0])
+        self.assertEqual(self.call('GET','/call-history',token=u),[])
 if __name__=='__main__': unittest.main()

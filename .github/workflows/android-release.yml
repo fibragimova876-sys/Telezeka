@@ -64,7 +64,7 @@ jobs:
       - run: python scripts/fix_android_jvm.py
       - run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/main.dart
         working-directory: build_app
-      - run: flutter build apk --release --build-name=0.4.1 --build-number=100${{ github.run_number }} --dart-define=TELEZEKA_VERSION=0.4.1
+      - run: flutter build apk --release --build-name=0.5.0 --build-number=100${{ github.run_number }} --dart-define=TELEZEKA_VERSION=0.5.0
         working-directory: build_app
       - name: Prepare APK
         run: |
@@ -81,9 +81,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v0.4.1-android.${GITHUB_RUN_NUMBER}"
+          tag="v0.5.0-android.${GITHUB_RUN_NUMBER}"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" dist/Telezeka-Android.apk dist/SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$tag" dist/Telezeka-Android.apk dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Telezeka Android 0.4.1 preview" --notes "Experimental test-signed Android APK. Server must be deployed and verification providers configured. Not for sensitive communication."
+            gh release create "$tag" dist/Telezeka-Android.apk dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Telezeka Android 0.5.0 preview" --notes "Experimental test-signed Android APK. Server must be deployed and verification providers configured. Not for sensitive communication."
           fi

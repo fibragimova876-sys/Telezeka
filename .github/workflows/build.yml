@@ -30,7 +30,7 @@ jobs:
         working-directory: build_app
       - run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/main.dart
         working-directory: build_app
-      - run: flutter build ios --release --no-codesign --build-name=0.4.1 --build-number=${{ github.run_number }} --dart-define=TELEZEKA_VERSION=0.4.1
+      - run: flutter build ios --release --no-codesign --build-name=0.5.0 --build-number=${{ github.run_number }} --dart-define=TELEZEKA_VERSION=0.5.0
         working-directory: build_app
       - name: Package unsigned IPA
         run: |
@@ -49,9 +49,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          tag="v0.4.1-ios.${GITHUB_RUN_NUMBER}"
+          tag="v0.5.0-ios.${GITHUB_RUN_NUMBER}"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Telezeka 0.4.1 iOS (unsigned)" --notes "Unsigned IPA: Apple signing and a suitable provisioning profile are required before installation. Experimental software; server deployment required."
+            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Telezeka 0.5.0 iOS (unsigned)" --notes "Unsigned IPA: Apple signing and a suitable provisioning profile are required before installation. Experimental software; server deployment required."
           fi
