@@ -33,4 +33,31 @@ class Permissions(unittest.TestCase):
         with self.assertRaises(s.Err): self.call('GET',f'/chats/{ch}/messages',token=self.owner['token'])
         self.call('POST',f'/chats/{ch}/prefs',{'favorite':True},self.member['token'])
         self.assertEqual(self.call('GET','/chats',token=self.member['token'])[0]['favorite'],1)
+    def test_phone_email_and_code_replay(self):
+        phone='+7 (978) 000 00 00'
+        email='dual@example.test'
+        with patch.object(s,'deliver_code') as delivery:
+            self.call('POST','/auth/send-code',{'contact':phone,'invite':s.INVITE})
+            self.assertEqual(delivery.call_args.args[:2],('phone','+79780000000'))
+            pc=delivery.call_args.args[2]
+            self.call('POST','/auth/send-code',{'contact':email,'invite':s.INVITE})
+            ec=delivery.call_args.args[2]
+        data={'name':'Dual','username':'dual1','contact':phone,'password':'dual-test-password','invite':s.INVITE,'code':pc,'second_contact':email,'second_code':('000000' if ec!='000000' else '111111')}
+        with self.assertRaises(s.Err): self.call('POST','/register',data)
+        data['second_code']=ec
+        user=self.call('POST','/register',data)
+        for login in ('+79780000000',email):
+            self.assertEqual(self.call('POST','/login',{'contact':login,'password':data['password']})['user']['id'],user['user']['id'])
+        with self.assertRaises(s.Err): self.call('POST','/register',data)
+    def test_no_unverified_signup(self):
+        with self.assertRaises(s.Err): self.call('POST','/register',{'name':'No Code','contact':'+79780000001','password':'test-password','invite':s.INVITE})
+        with patch.object(s,'deliver_code') as delivery:
+            self.call('POST','/auth/send-code',{'contact':'+79780000001','invite':s.INVITE})
+            code=delivery.call_args.args[2]
+        with self.assertRaises(s.Err): self.call('POST','/auth/send-code',{'contact':'+7 978 000 00 01','invite':s.INVITE})
+        data={'name':'Attempts','contact':'+79780000001','password':'test-password','invite':s.INVITE,'code':('000000' if code!='000000' else '111111')}
+        for _ in range(5):
+            with self.assertRaises(s.Err): self.call('POST','/register',data)
+        data['code']=code
+        with self.assertRaises(s.Err): self.call('POST','/register',data)
 if __name__=='__main__': unittest.main()
