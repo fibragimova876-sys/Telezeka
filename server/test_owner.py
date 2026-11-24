@@ -78,4 +78,20 @@ class Permissions(unittest.TestCase):
             self.call('POST','/auth/login-code',{'contact':'unknown@example.test'})
             delivery.assert_not_called()
         with self.assertRaises(s.Err): self.call('POST','/auth/login-code',{'contact':'zakaria@telezeka.local'})
+    def test_forwarding_and_media_access(self):
+        u=self.member['token']
+        admin=self.owner['token']
+        source=self.call('POST','/chats',{'kind':'group','title':'Source'},u)['id']
+        dest=self.call('POST','/chats',{'kind':'group','title':'Destination'},u)['id']
+        private=self.call('POST','/chats',{'kind':'group','title':'Owner only'},admin)['id']
+        msg=self.call('POST',f'/chats/{source}/messages',{'kind':'text','body':'Hello'},u)['id']
+        with self.assertRaises(s.Err): self.call('POST',f'/messages/{msg}/forward',{'chat':private},u)
+        with self.assertRaises(s.Err): self.call('POST',f'/messages/{msg}/forward',{'chat':private},admin)
+        mid=self.call('POST',f'/messages/{msg}/forward',{'chat':dest},u)['id']
+        rows=self.call('GET',f'/chats/{dest}/messages',token=u)
+        self.assertEqual(rows[0]['id'],mid)
+        self.assertEqual(rows[0]['body'],'Hello')
+        file_id=self.call('POST',f'/chats/{source}/messages',{'kind':'file','filename':'hello.txt','body':'aGVsbG8='},u)['id']
+        self.assertEqual(self.call('GET',f'/chats/{source}/files',token=u)[0]['id'],file_id)
+        with self.assertRaises(s.Err): self.call('GET',f'/chats/{source}/files',token=admin)
 if __name__=='__main__': unittest.main()
