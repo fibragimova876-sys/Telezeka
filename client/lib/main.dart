@@ -18,7 +18,48 @@ class Api {
     if(body!=null)r.write(jsonEncode(body));final res=await r.close().timeout(const Duration(seconds:30));final data=jsonDecode(await utf8.decoder.bind(res).join());if(res.statusCode>=400)throw Exception(data['error']??'Ошибка сети');return data;
   }
 }
-class FamilyApp extends StatelessWidget {const FamilyApp({super.key}); @override Widget build(BuildContext context)=>MaterialApp(title:'Telezeka',debugShowCheckedModeBanner:false,theme:ThemeData(colorScheme:ColorScheme.fromSeed(seedColor:const Color(0xff2999d5)),useMaterial3:true),darkTheme:ThemeData(colorScheme:ColorScheme.fromSeed(seedColor:const Color(0xff2999d5),brightness:Brightness.dark),useMaterial3:true),home:const Login());}
+enum TelezekaTheme {system,light,dark}
+final themeMode=ValueNotifier<ThemeMode>(ThemeMode.system);
+class FamilyApp extends StatelessWidget {
+ const FamilyApp({super.key});
+ static ThemeData design(Brightness brightness){
+  final dark=brightness==Brightness.dark;
+  final scheme=ColorScheme.fromSeed(seedColor:const Color(0xff187ba8),brightness:brightness).copyWith(
+    primary:dark?const Color(0xff71c6eb):const Color(0xff146b96),
+    onPrimary:dark?const Color(0xff102733):Colors.white,
+    surface:dark?const Color(0xff18232d):const Color(0xfffcfdfe),
+    surfaceContainerLowest:dark?const Color(0xff101a23):const Color(0xffedf2f6),
+    surfaceContainerHigh:dark?const Color(0xff273947):const Color(0xffe7edf3),
+    surfaceContainerHighest:dark?const Color(0xff314553):const Color(0xffdce7ef),
+    primaryContainer:dark?const Color(0xff1c465b):const Color(0xffd2edf8),
+    onPrimaryContainer:dark?const Color(0xffe1f4fc):const Color(0xff173b50),
+    outlineVariant:dark?const Color(0xff32424f):const Color(0xffdce4eb));
+  final base=ThemeData(useMaterial3:true,colorScheme:scheme,scaffoldBackgroundColor:scheme.surface);
+  return base.copyWith(
+    textTheme:base.textTheme,
+    appBarTheme:AppBarTheme(backgroundColor:scheme.surface,foregroundColor:scheme.onSurface,elevation:0,scrolledUnderElevation:0,titleTextStyle:TextStyle(color:scheme.onSurface,fontWeight:FontWeight.w600,fontSize:18)),
+    dividerTheme:DividerThemeData(color:scheme.outlineVariant,thickness:1,space:1),
+    inputDecorationTheme:InputDecorationTheme(filled:true,fillColor:scheme.surfaceContainerLowest,border:OutlineInputBorder(borderRadius:BorderRadius.circular(12),borderSide:BorderSide.none),enabledBorder:OutlineInputBorder(borderRadius:BorderRadius.circular(12),borderSide:BorderSide.none),focusedBorder:OutlineInputBorder(borderRadius:BorderRadius.circular(12),borderSide:BorderSide(color:scheme.primary,width:1.5)),contentPadding:const EdgeInsets.symmetric(horizontal:16,vertical:14)),
+    filledButtonTheme:FilledButtonThemeData(style:FilledButton.styleFrom(minimumSize:const Size(64,46),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12)),textStyle:const TextStyle(fontSize:14,fontWeight:FontWeight.w600))),
+    snackBarTheme:SnackBarThemeData(behavior:SnackBarBehavior.floating,shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12))),
+    popupMenuTheme:PopupMenuThemeData(shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12)),color:scheme.surface,elevation:4),
+    dialogTheme:DialogThemeData(shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(20)),backgroundColor:scheme.surface),
+    navigationBarTheme:NavigationBarThemeData(backgroundColor:scheme.surface,indicatorColor:scheme.primaryContainer,height:66),
+    listTileTheme:ListTileThemeData(shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(10)),selectedTileColor:scheme.primaryContainer,contentPadding:const EdgeInsets.symmetric(horizontal:12,vertical:3)),
+  );
+ }
+ @override Widget build(BuildContext context)=>ValueListenableBuilder<ThemeMode>(valueListenable:themeMode,builder:(_,mode,child)=>MaterialApp(title:'Telezeka',debugShowCheckedModeBanner:false,theme:design(Brightness.light),darkTheme:design(Brightness.dark),themeMode:mode,home:const Login()));
+}
+class TelezekaAvatar extends StatelessWidget{
+ const TelezekaAvatar({super.key,required this.name,this.kind='direct',this.size=44});
+ final String name,kind;final double size;
+ @override Widget build(BuildContext context){
+  const colors=[Color(0xff3e7993),Color(0xff607b78),Color(0xff776e9e),Color(0xff9b7359),Color(0xff597898)];
+  final color=colors[name.codeUnits.fold(0,(a,b)=>a+b)%colors.length];
+  final initials=name.trim().split(RegExp(r'\s+')).where((w)=>w.isNotEmpty).take(2).map((w)=>String.fromCharCode(w.runes.first).toUpperCase()).join();
+  return Container(width:size,height:size,decoration:BoxDecoration(color:color,shape:BoxShape.circle),alignment:Alignment.center,child:kind=='group'?Icon(Icons.groups_outlined,color:Colors.white,size:size*.47):kind=='channel'?Icon(Icons.campaign_outlined,color:Colors.white,size:size*.47):Text(initials.isEmpty?'?':initials,style:TextStyle(color:Colors.white,fontSize:size*.34,fontWeight:FontWeight.w600)));
+ }
+}
 class Login extends StatefulWidget {const Login({super.key});@override State<Login> createState()=>_Login();}
 class _Login extends State<Login>{
  static const server=String.fromEnvironment('CHAT_URL',defaultValue:'https://telezeka-api-production.up.railway.app');
@@ -90,9 +131,123 @@ class _Home extends State<Home>{
   Future<void> findMessages()async{final id=selected?['id'];final q=await ask('Поиск по переписке','Текст');if(q==null||q.isEmpty||!mounted)return;try{final rows=await api.req('/chats/$id/search?q=${Uri.encodeQueryComponent(q)}') as List;if(!mounted)return;await showDialog(context:context,builder:(ctx)=>AlertDialog(title:const Text('Результаты поиска'),content:SizedBox(width:400,child:rows.isEmpty?const Text('Ничего не найдено'):ListView(shrinkWrap:true,children:[for(final m in rows)ListTile(title:Text(m['body']),subtitle:Text(m['name']))])),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Закрыть'))]));}catch(e){notice(e);}}
   Future<void> attach()async{final id=selected?['id'];if(id==null)return;try{final pick=await FilePicker.platform.pickFiles();final f=pick?.files.single;if(f==null||f.path==null)return;if(f.size>16*1024*1024)throw Exception('Файл больше 16 МБ');await api.req('/chats/$id/messages',{'kind':'file','filename':f.name,'body':base64Encode(await File(f.path!).readAsBytes())});await refresh();}catch(e){notice(e);}}
   Future<void> downloadFile(dynamic m)async{try{final r=await api.req('/media/${m['id']}');final bytes=base64Decode(r['body']);final path=await FilePicker.platform.saveFile(fileName:r['filename']??'attachment',bytes:bytes);if(path!=null){if(Platform.isWindows)await File(path).writeAsBytes(bytes);notice('Файл сохранён');}}catch(e){notice(e);}}
-  Widget sidebar()=>Column(children:[ListTile(leading:const CircleAvatar(child:Icon(Icons.person)),title:Text(me['name']),subtitle:Text(me['username']==null?'Мой профиль':'@${me['username']}'),onTap:profile,trailing:PopupMenuButton<String>(onSelected:(v)async{if(v=='logout'){try{await api.req('/logout',{});}catch(_){}if(mounted)Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const Login()));}else if(v=='admin'){admin();}else if(v=='saved'){saved();}else if(v=='security'){security();}else if(v=='blocks'){blockedUsers();}else if(v=='sessions'){try{await api.req('/me/sessions',{});notice('Другие сеансы завершены');}catch(e){notice(e);}}else{create(v);}},itemBuilder:(_)=>[if(me['role']=='owner')const PopupMenuItem(value:'admin',child:Text('Панель владельца')),const PopupMenuItem(value:'saved',child:Text('Избранное')),const PopupMenuItem(value:'security',child:Text('Сменить пароль')),const PopupMenuItem(value:'sessions',child:Text('Завершить другие сеансы')),const PopupMenuItem(value:'blocks',child:Text('Заблокированные')),PopupMenuItem(value:'direct',child:Text('Новый личный чат')),PopupMenuItem(value:'group',child:Text('Создать группу')),PopupMenuItem(value:'channel',child:Text('Создать канал')),PopupMenuItem(value:'logout',child:Text('Выйти'))])),Padding(padding:const EdgeInsets.all(12),child:TextField(controller:search,decoration:const InputDecoration(prefixIcon:Icon(Icons.search),hintText:'Поиск чатов',border:OutlineInputBorder()))),if(announcement.isNotEmpty)ListTile(leading:const Icon(Icons.campaign),title:Text(announcement)),SwitchListTile(title:const Text('Архив'),value:showArchived,onChanged:(v)=>setState(()=>showArchived=v)),if(error.isNotEmpty)Padding(padding:const EdgeInsets.all(8),child:Text(error)),Expanded(child:ListView(children:[for(final c in chats.where((x)=>((x['archived']??0)==1)==showArchived&&x['title'].toString().toLowerCase().contains(search.text.toLowerCase())))ListTile(selected:selected?['id']==c['id'],leading:CircleAvatar(child:Icon(c['kind']=='group'?Icons.group:c['kind']=='channel'?Icons.campaign:Icons.person)),title:Text('${(c['favorite']??0)==1?'★ ':''}${c['title']}'),subtitle:Text(c['kind']=='group'?'Группа · ${c['members'].length} чел.':c['kind']=='channel'?'Канал':'Личный чат'),trailing:(c['unread']??0)>0?Badge(label:Text('${c['unread']}')):null,onTap:()=>choose(c))]))]);
-  Widget chat(bool wide){final c=selected;if(c==null)return const Center(child:Text('Выберите чат или создайте новый'));final canWrite=c['kind']!='channel'||c['owner']==me['id'];return Column(children:[Material(elevation:1,child:ListTile(leading:wide?null:IconButton(icon:const Icon(Icons.arrow_back),onPressed:recording?null:()=>setState(()=>selected=null)),title:Text(c['title'],style:const TextStyle(fontWeight:FontWeight.bold)),subtitle:Text(c['kind']=='direct'?'Личный чат':'${c['members'].length} участников'),trailing:Row(mainAxisSize:MainAxisSize.min,children:[IconButton(onPressed:findMessages,icon:const Icon(Icons.search),tooltip:'Поиск сообщений'),if(c['kind']=='direct')...[IconButton(onPressed:()=>startCall(false),icon:const Icon(Icons.call),tooltip:'Аудиозвонок'),IconButton(onPressed:()=>startCall(true),icon:const Icon(Icons.videocam),tooltip:'Видеозвонок')],if(c['kind']!='direct'&&c['owner']==me['id'])IconButton(onPressed:addMember,icon:const Icon(Icons.person_add),tooltip:'Добавить участника'),PopupMenuButton<String>(onSelected:chatOption,itemBuilder:(_)=>[PopupMenuItem(value:'favorite',child:Text((c['favorite']??0)==1?'Убрать из избранного':'В избранное')),PopupMenuItem(value:'archived',child:Text((c['archived']??0)==1?'Разархивировать':'Архивировать')),PopupMenuItem(value:'muted',child:Text((c['muted']??0)==1?'Включить уведомления':'Без уведомлений')),if(c['kind']=='direct')const PopupMenuItem(value:'block',child:Text('Заблокировать')),if(c['kind']!='direct'&&c['owner']==me['id'])const PopupMenuItem(value:'rename',child:Text('Переименовать')),if(c['kind']!='direct'&&c['owner']!=me['id'])const PopupMenuItem(value:'leave',child:Text('Покинуть'))])]))),if(c['pin']!=null)ListTile(dense:true,leading:const Icon(Icons.push_pin),title:Text(c['pin']['preview'],maxLines:1,overflow:TextOverflow.ellipsis),subtitle:const Text('Закреплено'),trailing:c['kind']=='direct'||c['owner']==me['id']?IconButton(icon:const Icon(Icons.close),onPressed:()async{try{await api.req('/chats/${c['id']}/pin',{'id':null});await refresh();}catch(e){notice(e);}}):null),Expanded(child:Container(color:Theme.of(context).colorScheme.surfaceContainerLowest,child:ListView.builder(reverse:true,padding:const EdgeInsets.all(14),itemCount:messages.length,itemBuilder:(_,i){final m=messages[messages.length-1-i];final own=m['sender']==me['id'];return Align(alignment:own?Alignment.centerRight:Alignment.centerLeft,child:GestureDetector(onLongPress:()=>messageMenu(m),onSecondaryTap:()=>messageMenu(m),child:Container(constraints:const BoxConstraints(maxWidth:360),margin:const EdgeInsets.symmetric(vertical:4),padding:const EdgeInsets.all(12),decoration:BoxDecoration(color:own?Theme.of(context).colorScheme.primaryContainer:Theme.of(context).colorScheme.surfaceContainerHighest,borderRadius:BorderRadius.circular(16)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[if(!own&&c['kind']!='direct')Text(m['name'],style:const TextStyle(fontWeight:FontWeight.bold)),if(m['reply_preview']!=null)Text('↪ ${m['reply_preview']}',style:Theme.of(context).textTheme.labelMedium),if(m['deleted']==1)const Text('Сообщение удалено',style:TextStyle(fontStyle:FontStyle.italic))else if(m['kind']=='text')Text(m['body'])else if(m['kind']=='file'||m['kind']=='photo')TextButton.icon(onPressed:()=>downloadFile(m),icon:const Icon(Icons.download),label:Text(m['filename']??'Файл'))else TextButton.icon(onPressed:()=>showDialog(context:context,builder:(_)=>MediaDialog(api:api,id:m['id'],circle:m['kind']=='circle')),icon:Icon(m['kind']=='circle'?Icons.play_circle:Icons.play_arrow),label:Text(m['kind']=='circle'?'Видеокружок':'Голосовое сообщение')),if((m['reactions'] as List? ?? []).isNotEmpty)Wrap(children:[for(final r in m['reactions'])TextButton(onPressed:()=>messageAction(m,r['emoji']),child:Text('${r['emoji']} ${r['count']}'))]),if(m['edited']!=null)const Text('изменено',style:TextStyle(fontSize:10)),Text(TimeOfDay.fromDateTime(DateTime.fromMillisecondsSinceEpoch(m['created']*1000)).format(context),style:Theme.of(context).textTheme.labelSmall)]))));}))),if(canWrite&&reply!=null)ListTile(dense:true,leading:const Icon(Icons.reply),title:Text(reply!['kind']=='text'?reply!['body']:'Вложение',maxLines:1),trailing:IconButton(onPressed:()=>setState(()=>reply=null),icon:const Icon(Icons.close))),if(canWrite)SafeArea(top:false,child:Padding(padding:const EdgeInsets.all(8),child:Row(children:[IconButton(onPressed:attach,icon:const Icon(Icons.attach_file),tooltip:'Файл'),IconButton(onPressed:circle,icon:const Icon(Icons.video_library_outlined),tooltip:'Видеокружок'),Expanded(child:TextField(controller:text,onSubmitted:(_)=>sendText(),decoration:InputDecoration(hintText:recording?'Запись голосового…':'Сообщение',border:const OutlineInputBorder()))),IconButton(onPressed:voice,icon:Icon(recording?Icons.stop_circle:Icons.mic, color:recording?Colors.red:null),tooltip:recording?'Остановить и отправить':'Записать голосовое'),IconButton(onPressed:sendText,icon:const Icon(Icons.send))])))else const Padding(padding:EdgeInsets.all(16),child:Text('Канал: публикации доступны владельцу'))]);}
-  @override Widget build(BuildContext context)=>Scaffold(body:SafeArea(child:LayoutBuilder(builder:(ctx,b){final wide=b.maxWidth>720;return wide?Row(children:[SizedBox(width:310,child:sidebar()),const VerticalDivider(width:1),Expanded(child:chat(true))]):selected==null?sidebar():chat(false);})));
+  int chatFilter=0;
+  bool mobileSettings=false;
+  Future<void> menuAction(String v)async{
+    if(v=='logout'){
+      try{await api.req('/logout',{});}catch(_){}
+      if(mounted)Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const Login()));
+    }else if(v=='admin'){await admin();}
+    else if(v=='saved'){await saved();}
+    else if(v=='security'){await security();}
+    else if(v=='blocks'){await blockedUsers();}
+    else if(v=='sessions'){try{await api.req('/me/sessions',{});notice('Другие сеансы завершены');}catch(e){notice(e);}}
+    else{await create(v);}
+  }
+  void changeFilter(int value){setState((){chatFilter=value;showArchived=value==4;mobileSettings=false;});}
+  Future<void> newChat()async{
+    final chosen=await showModalBottomSheet<String>(context:context,showDragHandle:true,builder:(ctx)=>SafeArea(child:Padding(padding:const EdgeInsets.fromLTRB(12,0,12,16),child:Column(mainAxisSize:MainAxisSize.min,children:[
+      ListTile(leading:const Icon(Icons.chat_bubble_outline),title:const Text('Новый чат'),subtitle:const Text('Начать переписку по username'),onTap:()=>Navigator.pop(ctx,'direct')),
+      ListTile(leading:const Icon(Icons.group_add_outlined),title:const Text('Создать группу'),subtitle:const Text('Общайтесь вместе'),onTap:()=>Navigator.pop(ctx,'group')),
+      ListTile(leading:const Icon(Icons.campaign_outlined),title:const Text('Создать канал'),subtitle:const Text('Публикуйте объявления'),onTap:()=>Navigator.pop(ctx,'channel')),
+    ]))));
+    if(chosen!=null&&mounted)await create(chosen);
+  }
+  Widget sectionTitle(String title)=>Padding(padding:const EdgeInsets.fromLTRB(20,18,20,8),child:Text(title,style:Theme.of(context).textTheme.labelLarge?.copyWith(color:Theme.of(context).colorScheme.onSurfaceVariant,fontWeight:FontWeight.w600)));
+  Widget settings(){
+    final c=Theme.of(context).colorScheme;
+    return ListView(padding:const EdgeInsets.fromLTRB(8,12,8,24),children:[
+      Padding(padding:const EdgeInsets.all(14),child:Column(children:[TelezekaAvatar(name:me['name'].toString(),size:76),const SizedBox(height:12),Text(me['name'].toString(),style:Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight:FontWeight.w600)),Text(me['username']==null?'Username не указан':'@${me['username']}',style:TextStyle(color:c.onSurfaceVariant)),const SizedBox(height:12),OutlinedButton.icon(onPressed:profile,icon:const Icon(Icons.edit_outlined,size:18),label:const Text('Редактировать профиль'))])),
+      sectionTitle('АККАУНТ'),ListTile(leading:const Icon(Icons.bookmark_border),title:const Text('Избранные сообщения'),onTap:saved),ListTile(leading:const Icon(Icons.lock_outline),title:const Text('Пароль'),onTap:security),ListTile(leading:const Icon(Icons.devices_outlined),title:const Text('Завершить другие сеансы'),onTap:()=>menuAction('sessions')),ListTile(leading:const Icon(Icons.block_outlined),title:const Text('Заблокированные'),onTap:blockedUsers),
+      sectionTitle('ОФОРМЛЕНИЕ'),Padding(padding:const EdgeInsets.symmetric(horizontal:12),child:ValueListenableBuilder<ThemeMode>(valueListenable:themeMode,builder:(_,mode,child)=>SegmentedButton<ThemeMode>(segments:const [ButtonSegment(value:ThemeMode.system,icon:Icon(Icons.settings_brightness),label:Text('Авто')),ButtonSegment(value:ThemeMode.light,icon:Icon(Icons.light_mode_outlined),label:Text('Свет')),ButtonSegment(value:ThemeMode.dark,icon:Icon(Icons.dark_mode_outlined),label:Text('Тьма'))],selected:{mode},onSelectionChanged:(m)=>themeMode.value=m.first))),
+      if(me['role']=='owner')...[sectionTitle('УПРАВЛЕНИЕ'),ListTile(leading:const Icon(Icons.admin_panel_settings_outlined),title:const Text('Панель владельца'),onTap:admin)],
+      sectionTitle('TELEZEKA'),ListTile(leading:const Icon(Icons.info_outline),title:const Text('Версия 0.3 · Preview'),subtitle:const Text('Предварительная сборка')),ListTile(leading:Icon(Icons.logout,color:c.error),title:Text('Выйти',style:TextStyle(color:c.error)),onTap:()=>menuAction('logout')),
+    ]);
+  }
+  Widget sidebar(){
+    final t=Theme.of(context),c=t.colorScheme;
+    final filtered=chats.where((x){
+      if(((x['archived']??0)==1)!=showArchived)return false;
+      if(chatFilter==1&&(x['unread']??0)==0)return false;
+      if(chatFilter==2&&x['kind']!='group')return false;
+      if(chatFilter==3&&x['kind']!='channel')return false;
+      return x['title'].toString().toLowerCase().contains(search.text.toLowerCase());
+    }).toList();
+    return Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+      Padding(padding:const EdgeInsets.fromLTRB(18,14,10,8),child:Row(children:[
+        Text(mobileSettings?'Настройки':'Telezeka',style:t.textTheme.headlineSmall?.copyWith(fontWeight:FontWeight.w700,letterSpacing:-.6)),
+        const Spacer(),if(!mobileSettings)IconButton(onPressed:newChat,icon:const Icon(Icons.edit_square),tooltip:'Новый чат'),
+        InkWell(borderRadius:BorderRadius.circular(28),onTap:()=>setState(()=>mobileSettings=!mobileSettings),child:TelezekaAvatar(name:me['name'].toString(),size:36)),
+      ])),
+      if(mobileSettings)Expanded(child:settings())else ...[
+        Padding(padding:const EdgeInsets.fromLTRB(14,6,14,10),child:TextField(controller:search,decoration:InputDecoration(prefixIcon:const Icon(Icons.search,size:20),hintText:'Поиск',suffixIcon:search.text.isEmpty?null:IconButton(onPressed:search.clear,icon:const Icon(Icons.close,size:18))))),
+        SizedBox(height:40,child:ListView(scrollDirection:Axis.horizontal,padding:const EdgeInsets.symmetric(horizontal:12),children:[
+          for(final item in const [(0,'Все'),(1,'Новые'),(2,'Группы'),(3,'Каналы'),(4,'Архив')])Padding(padding:const EdgeInsets.only(right:6),child:ChoiceChip(label:Text(item.$2),selected:chatFilter==item.$1,onSelected:(_)=>changeFilter(item.$1),showCheckmark:false,shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(9)),side:BorderSide.none,backgroundColor:c.surface,selectedColor:c.primaryContainer,labelStyle:TextStyle(fontSize:12,fontWeight:chatFilter==item.$1?FontWeight.w600:FontWeight.w400))),
+        ])),
+        if(announcement.isNotEmpty)Padding(padding:const EdgeInsets.fromLTRB(14,8,14,4),child:Container(decoration:BoxDecoration(color:c.primaryContainer,borderRadius:BorderRadius.circular(10)),padding:const EdgeInsets.all(12),child:Row(children:[Icon(Icons.campaign_outlined,size:20,color:c.primary),const SizedBox(width:10),Expanded(child:Text(announcement,maxLines:3,overflow:TextOverflow.ellipsis))]))),
+        if(error.isNotEmpty)Padding(padding:const EdgeInsets.all(12),child:Text(error,maxLines:2,overflow:TextOverflow.ellipsis,style:TextStyle(color:c.error,fontSize:12))),
+        Expanded(child:filtered.isEmpty?Center(child:Padding(padding:const EdgeInsets.all(28),child:Column(mainAxisSize:MainAxisSize.min,children:[Icon(Icons.forum_outlined,size:42,color:c.onSurfaceVariant),const SizedBox(height:12),Text('Нет чатов',style:t.textTheme.titleMedium),const SizedBox(height:6),Text('Начните новую переписку или измените фильтр.',textAlign:TextAlign.center,style:t.textTheme.bodySmall?.copyWith(color:c.onSurfaceVariant)),const SizedBox(height:14),TextButton(onPressed:newChat,child:const Text('Новый чат'))]))):ListView.builder(padding:const EdgeInsets.fromLTRB(8,6,8,12),itemCount:filtered.length,itemBuilder:(ctx,i){
+          final x=filtered[i],unread=x['unread']??0,chosen=selected?['id']==x['id'];
+          return Padding(padding:const EdgeInsets.only(bottom:3),child:ListTile(selected:chosen,onTap:()=>choose(x),leading:TelezekaAvatar(name:x['title'].toString(),kind:x['kind'].toString(),size:46),title:Text(x['title'].toString(),maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.w600,fontSize:15)),subtitle:Text(x['kind']=='group'?'Группа · ${x['members'].length} участников':x['kind']=='channel'?'Канал':'Личная переписка',maxLines:1,overflow:TextOverflow.ellipsis,style:TextStyle(color:c.onSurfaceVariant,fontSize:12)),trailing:Row(mainAxisSize:MainAxisSize.min,children:[if((x['muted']??0)==1)Icon(Icons.notifications_off_outlined,size:16,color:c.onSurfaceVariant),if((x['favorite']??0)==1)Icon(Icons.star_rounded,size:17,color:c.primary),if(unread>0)Container(margin:const EdgeInsets.only(left:4),padding:const EdgeInsets.symmetric(horizontal:7,vertical:3),decoration:BoxDecoration(color:c.primary,borderRadius:BorderRadius.circular(12)),child:Text(unread>99?'99+':'$unread',style:TextStyle(color:c.onPrimary,fontSize:11,fontWeight:FontWeight.w600)))])));
+        })),
+      ],
+      const Divider(),NavigationBar(selectedIndex:mobileSettings?2:0,onDestinationSelected:(v){if(v==1){saved();return;}setState(()=>mobileSettings=v==2);},destinations:const [NavigationDestination(icon:Icon(Icons.chat_bubble_outline),selectedIcon:Icon(Icons.chat_bubble),label:'Чаты'),NavigationDestination(icon:Icon(Icons.bookmark_border),label:'Избранное'),NavigationDestination(icon:Icon(Icons.settings_outlined),selectedIcon:Icon(Icons.settings),label:'Настройки')]),
+    ]);
+  }
+  Widget chat(bool wide){
+    final room=selected,t=Theme.of(context),c=t.colorScheme;
+    if(room==null)return Container(color:c.surfaceContainerLowest,child:Center(child:Column(mainAxisSize:MainAxisSize.min,children:[Container(width:84,height:84,decoration:BoxDecoration(color:c.primaryContainer,borderRadius:BorderRadius.circular(24)),child:Icon(Icons.send_rounded,size:40,color:c.primary)),const SizedBox(height:20),Text('Ваши разговоры',style:t.textTheme.headlineSmall?.copyWith(fontWeight:FontWeight.w600)),const SizedBox(height:8),Text('Выберите чат, чтобы начать общение.',style:TextStyle(color:c.onSurfaceVariant)),const SizedBox(height:20),FilledButton.icon(onPressed:newChat,icon:const Icon(Icons.edit_outlined),label:const Text('Новый чат'))])));
+    final canWrite=room['kind']!='channel'||room['owner']==me['id'];
+    return Column(children:[
+      Container(color:c.surface,padding:const EdgeInsets.symmetric(horizontal:8,vertical:8),child:Row(children:[
+        if(!wide)IconButton(onPressed:recording?null:()=>setState(()=>selected=null),icon:const Icon(Icons.arrow_back),tooltip:'Назад'),
+        if(wide)const SizedBox(width:6),
+        TelezekaAvatar(name:room['title'].toString(),kind:room['kind'].toString(),size:40),const SizedBox(width:10),
+        Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(room['title'].toString(),maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontSize:16,fontWeight:FontWeight.w600)),Text(room['kind']=='direct'?'Личная переписка':'${room['members'].length} участников',maxLines:1,overflow:TextOverflow.ellipsis,style:TextStyle(color:c.onSurfaceVariant,fontSize:12))])),
+        if(room['kind']=='direct')...[IconButton(onPressed:()=>startCall(false),icon:const Icon(Icons.call_outlined),tooltip:'Аудиозвонок'),if(wide)IconButton(onPressed:()=>startCall(true),icon:const Icon(Icons.videocam_outlined),tooltip:'Видеозвонок')],
+        if(wide)IconButton(onPressed:findMessages,icon:const Icon(Icons.search),tooltip:'Поиск сообщений'),
+        PopupMenuButton<String>(onSelected:(v){if(v=='search'){findMessages();}else if(v=='video'){startCall(true);}else if(v=='invite'){addMember();}else{chatOption(v);}},itemBuilder:(_)=>[
+          const PopupMenuItem(value:'search',child:Text('Поиск сообщений')),
+          if(room['kind']=='direct')const PopupMenuItem(value:'video',child:Text('Видеозвонок')),
+          if(room['kind']!='direct'&&room['owner']==me['id'])const PopupMenuItem(value:'invite',child:Text('Добавить участника')),
+          PopupMenuItem(value:'favorite',child:Text((room['favorite']??0)==1?'Убрать из избранного':'В избранное')),
+          PopupMenuItem(value:'archived',child:Text((room['archived']??0)==1?'Разархивировать':'Архивировать')),
+          PopupMenuItem(value:'muted',child:Text((room['muted']??0)==1?'Включить уведомления':'Без уведомлений')),
+          if(room['kind']=='direct')const PopupMenuItem(value:'block',child:Text('Заблокировать')),
+          if(room['kind']!='direct'&&room['owner']==me['id'])const PopupMenuItem(value:'rename',child:Text('Переименовать')),
+          if(room['kind']!='direct'&&room['owner']!=me['id'])const PopupMenuItem(value:'leave',child:Text('Покинуть')),
+        ]),
+      ])),const Divider(),
+      if(room['pin']!=null)Container(color:c.surfaceContainerHigh,child:ListTile(dense:true,leading:Icon(Icons.push_pin_outlined,color:c.primary),title:Text(room['pin']['preview'].toString(),maxLines:1,overflow:TextOverflow.ellipsis),subtitle:const Text('Закреплено'),trailing:room['kind']=='direct'||room['owner']==me['id']?IconButton(icon:const Icon(Icons.close),onPressed:()async{try{await api.req('/chats/${room['id']}/pin',{'id':null});await refresh();}catch(e){notice(e);}}):null)),
+      Expanded(child:Container(color:c.surfaceContainerLowest,child:messages.isEmpty?Center(child:Text('Напишите первое сообщение',style:TextStyle(color:c.onSurfaceVariant))):LayoutBuilder(builder:(ctx,limits)=>ListView.builder(reverse:true,padding:EdgeInsets.symmetric(horizontal:wide?24:10,vertical:16),itemCount:messages.length,itemBuilder:(_,i){
+        final index=messages.length-1-i,m=messages[index],own=m['sender']==me['id'];
+        final date=DateTime.fromMillisecondsSinceEpoch((m['created'] as num).toInt()*1000);
+        final older=index>0?DateTime.fromMillisecondsSinceEpoch((messages[index-1]['created'] as num).toInt()*1000):null;
+        final newDay=older==null||date.year!=older.year||date.month!=older.month||date.day!=older.day;
+        return Column(children:[
+          if(newDay)Padding(padding:const EdgeInsets.symmetric(vertical:10),child:Container(padding:const EdgeInsets.symmetric(horizontal:12,vertical:5),decoration:BoxDecoration(color:c.surfaceContainerHigh,borderRadius:BorderRadius.circular(12)),child:Text('${date.day.toString().padLeft(2,'0')}.${date.month.toString().padLeft(2,'0')}.${date.year}',style:TextStyle(fontSize:11,color:c.onSurfaceVariant)))),
+          Align(alignment:own?Alignment.centerRight:Alignment.centerLeft,child:GestureDetector(onLongPress:()=>messageMenu(m),onSecondaryTap:()=>messageMenu(m),child:Container(constraints:BoxConstraints(maxWidth:(limits.maxWidth*(wide ? 0.68 : 0.83)).clamp(160,540).toDouble()),margin:const EdgeInsets.symmetric(vertical:3),padding:const EdgeInsets.fromLTRB(12,9,12,7),decoration:BoxDecoration(color:own?c.primaryContainer:c.surface,border:own?null:Border.all(color:c.outlineVariant.withValues(alpha:.55)),borderRadius:BorderRadius.only(topLeft:const Radius.circular(15),topRight:const Radius.circular(15),bottomLeft:Radius.circular(own?15:4),bottomRight:Radius.circular(own?4:15))),child:Column(crossAxisAlignment:CrossAxisAlignment.start,mainAxisSize:MainAxisSize.min,children:[
+            if(!own&&room['kind']!='direct')Padding(padding:const EdgeInsets.only(bottom:4),child:Text(m['name'].toString(),style:TextStyle(fontWeight:FontWeight.w600,color:c.primary,fontSize:12))),
+            if(m['reply_preview']!=null)Container(margin:const EdgeInsets.only(bottom:6),padding:const EdgeInsets.fromLTRB(8,5,8,5),decoration:BoxDecoration(border:Border(left:BorderSide(color:c.primary,width:3)),color:c.surface.withValues(alpha:.35)),child:Text(m['reply_preview'].toString(),maxLines:2,overflow:TextOverflow.ellipsis,style:t.textTheme.labelMedium)),
+            if(m['deleted']==1)Text('Сообщение удалено',style:TextStyle(fontStyle:FontStyle.italic,color:c.onSurfaceVariant))else if(m['kind']=='text')Text(m['body'].toString(),style:TextStyle(fontSize:15,height:1.35,color:own?c.onPrimaryContainer:c.onSurface))else if(m['kind']=='file'||m['kind']=='photo')TextButton.icon(onPressed:()=>downloadFile(m),icon:const Icon(Icons.file_download_outlined),label:Text((m['filename']??'Файл').toString(),overflow:TextOverflow.ellipsis))else TextButton.icon(onPressed:()=>showDialog(context:context,builder:(_)=>MediaDialog(api:api,id:m['id'],circle:m['kind']=='circle')),icon:Icon(m['kind']=='circle'?Icons.play_circle:Icons.play_arrow),label:Text(m['kind']=='circle'?'Видеокружок':'Голосовое')),
+            if((m['reactions'] as List? ?? []).isNotEmpty)Wrap(spacing:4,children:[for(final r in m['reactions'])ActionChip(visualDensity:VisualDensity.compact,onPressed:()=>messageAction(m,r['emoji']),label:Text('${r['emoji']} ${r['count']}'))]),
+            const SizedBox(height:4),Row(mainAxisSize:MainAxisSize.min,children:[if(m['edited']!=null)Text('изменено · ',style:TextStyle(fontSize:10,color:c.onSurfaceVariant)),Text(TimeOfDay.fromDateTime(date).format(context),style:TextStyle(fontSize:10,color:c.onSurfaceVariant)),if(own)...[const SizedBox(width:4),Icon(Icons.check,size:13,color:c.primary)]])
+          ])))),
+        ]);
+      })))),
+      if(canWrite&&reply!=null)Container(color:c.surface,child:ListTile(dense:true,leading:Icon(Icons.reply,color:c.primary),title:Text(reply!['kind']=='text'?reply!['body']:'Вложение',maxLines:1),subtitle:const Text('Ответ на сообщение'),trailing:IconButton(onPressed:()=>setState(()=>reply=null),icon:const Icon(Icons.close)))),
+      if(canWrite)Container(color:c.surface,padding:const EdgeInsets.fromLTRB(6,8,8,10),child:SafeArea(top:false,child:Row(crossAxisAlignment:CrossAxisAlignment.center,children:[
+        IconButton(onPressed:attach,icon:const Icon(Icons.attach_file),tooltip:'Файл'),if(wide)IconButton(onPressed:circle,icon:const Icon(Icons.video_camera_back_outlined),tooltip:'Видеокружок'),
+        Expanded(child:TextField(controller:text,onSubmitted:(_)=>sendText(),decoration:InputDecoration(hintText:recording?'Запись…':'Написать сообщение',prefixIcon:null))),
+        if(!wide)IconButton(onPressed:circle,icon:const Icon(Icons.video_camera_back_outlined),tooltip:'Видеокружок'),
+        IconButton(onPressed:voice,icon:Icon(recording?Icons.stop_circle:Icons.mic_none_rounded,color:recording?c.error:null),tooltip:recording?'Остановить и отправить':'Голосовое сообщение'),
+        IconButton.filled(onPressed:sendText,icon:const Icon(Icons.send_rounded,size:20),tooltip:'Отправить'),
+      ])))else Padding(padding:const EdgeInsets.all(16),child:Text('Публикации доступны владельцу канала',style:TextStyle(color:c.onSurfaceVariant))),
+    ]);
+  }
+  @override Widget build(BuildContext context)=>Scaffold(body:SafeArea(child:LayoutBuilder(builder:(ctx,b){
+    final wide=b.maxWidth>=780;return wide?Row(children:[SizedBox(width:b.maxWidth>1150?360:320,child:sidebar()),const VerticalDivider(width:1),Expanded(child:chat(true))]):selected==null||mobileSettings?sidebar():chat(false);
+  })));
 }
 class MediaDialog extends StatefulWidget{const MediaDialog({super.key,required this.api,required this.id,required this.circle});final Api api;final int id;final bool circle;@override State<MediaDialog> createState()=>_MediaDialog();}
 class _MediaDialog extends State<MediaDialog>{final player=Player();late final vc=VideoController(player);String status='Загрузка…';File? file;bool ready=false;@override void initState(){super.initState();load();}Future<void> load()async{try{final r=await widget.api.req('/media/${widget.id}');if(!mounted)return;file=File('${Directory.systemTemp.path}/circle_play_${DateTime.now().microsecondsSinceEpoch}.${widget.circle?'mp4':'wav'}');await file!.writeAsBytes(base64Decode(r['body']));if(!mounted){await file!.delete();return;}await player.open(Media(file!.path),play:true);if(mounted)setState(()=>ready=true);}catch(e){if(mounted)setState(()=>status='$e');}}@override void dispose(){final f=file;player.dispose().then((_)async{if(f!=null&&await f.exists())await f.delete();});super.dispose();}@override Widget build(BuildContext context)=>AlertDialog(title:Text(widget.circle?'Видеокружок':'Голосовое'),content:ready?(widget.circle?SizedBox(width:260,height:260,child:ClipOval(child:Video(controller:vc,fit:BoxFit.cover))):const Text('Воспроизведение голосового')):Text(status),actions:[if(ready)IconButton(onPressed:()=>player.playOrPause(),icon:const Icon(Icons.play_arrow)),TextButton(onPressed:()=>Navigator.pop(context),child:const Text('Закрыть'))]);}
