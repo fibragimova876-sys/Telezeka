@@ -1,0 +1,59 @@
+name: Publish compiled mobile installers
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-mobile.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: v0.4.2-windows
+    steps:
+      - name: Download successful Android build
+        uses: actions/download-artifact@v4
+        with:
+          name: Telezeka-Android
+          run-id: 45381334273
+          github-token: ${{ github.token }}
+          path: android
+      - name: Download successful unsigned iOS build
+        uses: actions/download-artifact@v4
+        with:
+          name: Telezeka-iOS-unsigned
+          run-id: 45381279209
+          github-token: ${{ github.token }}
+          path: ios
+      - name: Verify and prepare mobile files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($item in @(@{dir='android';name='Telezeka-Android.apk'},@{dir='ios';name='Telezeka-iOS-unsigned.ipa'})) {
+            $file=Join-Path $item.dir $item.name
+            $expected=((Get-Content (Join-Path $item.dir 'SHA256SUMS.txt') -Raw).Trim() -split '\s+')[0]
+            if ((Get-FileHash $file -Algorithm SHA256).Hash -ne $expected) { throw "Checksum mismatch: $file" }
+          }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item android/Telezeka-Android.apk dist/Telezeka-Android-0.4.1.apk
+          Copy-Item ios/Telezeka-iOS-unsigned.ipa dist/Telezeka-iOS-0.4.1-unsigned.ipa
+          $names=@('Telezeka-Android-0.4.1.apk','Telezeka-iOS-0.4.1-unsigned.ipa')
+          $names | ForEach-Object { "$((Get-FileHash "dist/$_").Hash.ToLower())  $_" } | Set-Content -Encoding ascii dist/SHA256SUMS-mobile.txt
+          @'
+          Android 0.4.1, build 1004, Actions run 45381334273.
+          iOS 0.4.1, build 18, Actions run 45381279209.
+          iOS IPA is unsigned and requires Apple signing and provisioning before installation.
+          Both are experimental clients; working backend and verification providers are required.
+          The Windows files in this release remain version 0.4.2.
+          '@ | Set-Content -Encoding utf8 dist/mobile-build-info.txt
+      - name: Publish to existing release
+        shell: pwsh
+        run: |
+          gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY"
+          if ($LASTEXITCODE -ne 0) { throw 'Existing release not accessible' }
+          gh release upload "$env:RELEASE_TAG" dist/Telezeka-Android-0.4.1.apk dist/Telezeka-iOS-0.4.1-unsigned.ipa dist/SHA256SUMS-mobile.txt dist/mobile-build-info.txt --repo "$env:GITHUB_REPOSITORY"
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed; original artifacts remain available' }
