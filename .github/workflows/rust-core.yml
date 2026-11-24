@@ -5,6 +5,7 @@ on:
       - rust-core/**
       - Dockerfile.rust
       - scripts/run_hybrid.py
+      - scripts/test_rust_core.py
       - server/**
       - .github/workflows/rust-core.yml
   workflow_dispatch:
