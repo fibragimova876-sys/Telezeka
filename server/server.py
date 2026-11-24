@@ -177,7 +177,6 @@ def check_registration_code(c,kind,target,code,now):
     if not re.fullmatch(r'[0-9]{6}',str(code or '')) or not hmac.compare_digest(r['digest'],otp_digest(kind,target,str(code))):
         c.execute('UPDATE registration_codes SET attempts=attempts+1 WHERE target=?',(target,)); c.commit()
         raise Err(400,'Неверный код')
-    c.execute('DELETE FROM registration_codes WHERE target=?',(target,))
 
 def run(c,method,path,q,d,auth):
     now=int(time.time()); route=path.strip('/').split('/')
@@ -199,6 +198,8 @@ def run(c,method,path,q,d,auth):
             c.execute('BEGIN IMMEDIATE')
             check_registration_code(c,kind,target,d.get('code'),now)
             if other_kind: check_registration_code(c,other_kind,other_target,d.get('second_code'),now)
+            c.execute('DELETE FROM registration_codes WHERE target=?',(target,))
+            if other_kind: c.execute('DELETE FROM registration_codes WHERE target=?',(other_target,))
             salt=secrets.token_hex(16)
             stored_email=email or secrets.token_hex(24)+'@phone.telezeka.invalid'
             u=c.execute('INSERT INTO users(name,username,email,salt,hash,phone,email_verified,phone_verified) VALUES(?,?,?,?,?,?,?,?)',(n,un,stored_email,salt,password(p,salt),phone,int(email is not None),int(phone is not None))).lastrowid
