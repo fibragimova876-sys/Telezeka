@@ -202,7 +202,9 @@ def run(c,method,path,q,d,auth):
         c.execute('DELETE FROM registration_codes WHERE target=?',('login:'+target,))
         return session(c,r['id'])
     if method=='POST' and path in ('/register','/login'):
-        p=str(d.get('password','')); need(8<=len(p)<=256,'Пароль: от 8 символов',400)
+        p=str(d.get('password',''))
+        if path=='/register' and not p: p=secrets.token_urlsafe(32)
+        need(8<=len(p)<=256,'Пароль: от 8 символов',400)
         raw=str(d.get('contact') or d.get('email') or '').strip()
         if path=='/register':
             invite_check(c,d)
