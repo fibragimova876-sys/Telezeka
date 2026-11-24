@@ -45,6 +45,10 @@ def init():
         CREATE TABLE IF NOT EXISTS registration_codes(target TEXT PRIMARY KEY,digest TEXT NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS verification_sends(id INTEGER PRIMARY KEY,target TEXT NOT NULL,created INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS verification_sends_time ON verification_sends(created);
+        CREATE TABLE IF NOT EXISTS personal_notes(id INTEGER PRIMARY KEY,uid INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,created INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS personal_notes_uid ON personal_notes(uid,id);
+        CREATE INDEX IF NOT EXISTS calls_caller ON calls(caller,id);
+        CREATE INDEX IF NOT EXISTS calls_callee ON calls(callee,id);
         CREATE UNIQUE INDEX IF NOT EXISTS single_owner ON users(role) WHERE role='owner';
         """)
         c.execute("INSERT OR IGNORE INTO settings VALUES('registration','open')")
@@ -237,6 +241,36 @@ def run(c,method,path,q,d,auth):
         return session(c,u)
     t=auth.removeprefix('Bearer '); r=c.execute('SELECT sessions.uid,users.role FROM sessions JOIN users ON sessions.uid=users.id WHERE token=? AND expires>? AND users.banned=0',(tokenhash(t),now)).fetchone(); need(r,'Войдите в аккаунт',401); u=r['uid']
     role=r['role']
+    if path=='/discover' and method=='GET':
+        term=clean(q.get('q',[''])[0],80).lstrip('@')
+        need(len(term)>=2,'Введите минимум два символа',400)
+        return [dict(x) for x in c.execute("""SELECT id,name,username,bio FROM users
+            WHERE id!=? AND banned=0 AND username IS NOT NULL
+            AND (instr(casefold(username),casefold(?))>0 OR instr(casefold(name),casefold(?))>0)
+            AND NOT EXISTS(SELECT 1 FROM blocks WHERE (uid=? AND blocked=users.id) OR (uid=users.id AND blocked=?))
+            ORDER BY username LIMIT 50""",(u,term,term,u,u))]
+    if path=='/search' and method=='GET':
+        term=clean(q.get('q',[''])[0],120); need(len(term)>=2,'Введите минимум два символа',400)
+        return [dict(x) for x in c.execute("""SELECT m.id,m.chat,m.body,m.created,users.name,
+            CASE WHEN chats.kind='direct' THEN COALESCE((SELECT p.name FROM members mm JOIN users p ON p.id=mm.uid WHERE mm.chat=chats.id AND mm.uid!=? LIMIT 1),'Личный чат') ELSE chats.title END AS title
+            FROM messages m JOIN members ON members.chat=m.chat AND members.uid=?
+            JOIN chats ON chats.id=m.chat JOIN users ON users.id=m.sender
+            WHERE m.deleted=0 AND m.kind='text' AND instr(casefold(m.body),casefold(?))>0
+            ORDER BY m.id DESC LIMIT 100""",(u,u,term))]
+    if path=='/call-history' and method=='GET':
+        return [dict(x) for x in c.execute("""SELECT calls.id,calls.chat,calls.video,calls.status,calls.created,
+            CASE WHEN calls.caller=? THEN 1 ELSE 0 END AS outgoing,users.name,users.username
+            FROM calls JOIN users ON users.id=CASE WHEN calls.caller=? THEN calls.callee ELSE calls.caller END
+            WHERE (caller=? OR callee=?) ORDER BY calls.id DESC LIMIT 100""",(u,u,u,u))]
+    if path=='/notes':
+        if method=='GET': return [dict(x) for x in c.execute('SELECT id,body,created FROM personal_notes WHERE uid=? ORDER BY id DESC LIMIT 200',(u,))]
+        need(method=='POST'); body=str(d.get('body','')).strip()
+        need(0<len(body)<=12000,'Введите заметку',400)
+        need(c.execute('SELECT COUNT(*) FROM personal_notes WHERE uid=?',(u,)).fetchone()[0]<200,'Достигнут лимит 200 заметок',409)
+        return {'id':c.execute('INSERT INTO personal_notes(uid,body,created) VALUES(?,?,?)',(u,body,now)).lastrowid}
+    if path=='/notes/delete' and method=='POST':
+        note=int(d.get('id',0)); need(c.execute('DELETE FROM personal_notes WHERE uid=? AND id=?',(u,note)).rowcount,'Заметка не найдена',404)
+        return {'ok':True}
     if path=='/announcement' and method=='GET': return {'text':setting(c,'announcement')}
     if path=='/me/password' and method=='POST':
         old=str(d.get('old','')); new=str(d.get('new','')); need(12<=len(new)<=256,'Пароль: от 12 символов',400)
