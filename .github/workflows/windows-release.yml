@@ -1,0 +1,139 @@
+name: Windows current release
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/windows-release.yml
+      - client/**
+      - installer/**
+      - scripts/prepare.py
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: telezeka-current-windows
+  cancel-in-progress: false
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: 0.4.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.1'
+          channel: stable
+          cache: true
+      - run: python scripts/prepare.py
+      - run: flutter pub get
+        working-directory: build_app
+      - run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/main.dart
+        working-directory: build_app
+      - name: Compile current source
+        working-directory: build_app
+        shell: pwsh
+        run: |
+          flutter build windows --release --build-name="$env:VERSION" --build-number="$env:GITHUB_RUN_NUMBER" --dart-define="TELEZEKA_VERSION=$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+      - name: Package current application
+        shell: pwsh
+        run: |
+          $app = 'build_app/build/windows/x64/runner/Release'
+          if (!(Test-Path "$app/telezeka.exe") -or !(Test-Path "$app/data/app.so")) { throw 'Incomplete Windows build' }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item $app windows-app -Recurse
+          @{version=$env:VERSION;commit=$env:GITHUB_SHA;run=$env:GITHUB_RUN_ID} | ConvertTo-Json | Set-Content -Encoding utf8 windows-app/build-info.json
+          Compress-Archive -Path 'windows-app/*' -DestinationPath dist/Telezeka-Windows.zip -Force
+      - name: Install packaging tools
+        shell: pwsh
+        run: |
+          python -m pip install Pillow==11.3.0
+          if ($LASTEXITCODE -ne 0) { throw 'Pillow failed' }
+          dotnet tool install --global wix --version 4.0.6
+          if ($LASTEXITCODE -ne 0) { throw 'WiX failed' }
+          wix extension add -g WixToolset.UI.wixext/4.0.6
+          if ($LASTEXITCODE -ne 0) { throw 'WiX UI extension failed' }
+      - name: Build MSI and EXE from identical payload
+        shell: pwsh
+        run: |
+          python installer/build_msi.py --source windows-app --output dist/Telezeka-x64.msi --version "$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'MSI failed' }
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          & $csc /nologo /target:winexe /platform:x64 /optimize+ /reference:System.Windows.Forms.dll /win32icon:dist/msi-work/telezeka.ico /resource:dist/Telezeka-x64.msi,Telezeka.Payload /out:dist/Telezeka-Setup.exe installer/SetupBootstrap.cs
+          if ($LASTEXITCODE -ne 0) { throw 'EXE bootstrap failed' }
+          $assembly = [Reflection.Assembly]::LoadFile((Resolve-Path 'dist/Telezeka-Setup.exe').Path)
+          $stream = $assembly.GetManifestResourceStream('Telezeka.Payload')
+          if (!$stream) { throw 'EXE missing MSI payload' }
+          $sha = [Security.Cryptography.SHA256]::Create()
+          $embedded = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','')
+          $stream.Dispose()
+          if ($embedded -ne (Get-FileHash dist/Telezeka-x64.msi).Hash) { throw 'EXE and MSI differ' }
+      - name: Verify actual upgrade from published preview
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force previous | Out-Null
+          gh release download v0.2.0-preview --repo "$env:GITHUB_REPOSITORY" --pattern Telezeka-x64.msi --dir previous
+          if ($LASTEXITCODE -ne 0) { throw 'Old MSI download failed' }
+          $old=(Resolve-Path 'previous/Telezeka-x64.msi').Path
+          $new=(Resolve-Path 'dist/Telezeka-x64.msi').Path
+          function Install-Msi($file,$log) {
+            $p=Start-Process msiexec.exe -ArgumentList "/i ""$file"" /qn /norestart /l*v ""$log""" -PassThru -Wait
+            if ($p.ExitCode -notin @(0,3010)) { throw "Install failed: $($p.ExitCode)" }
+          }
+          Install-Msi $old (Join-Path $PWD 'old-install.log')
+          $installer=New-Object -ComObject WindowsInstaller.Installer
+          $db=$installer.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$installer,@($old,0))
+          $view=$db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@("SELECT Value FROM Property WHERE Property='ProductCode'"))
+          $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null) | Out-Null
+          $record=$view.GetType().InvokeMember('Fetch','InvokeMethod',$null,$view,$null)
+          $code=$record.GetType().InvokeMember('StringData','GetProperty',$null,$record,@(1))
+          Install-Msi $new (Join-Path $PWD 'new-install.log')
+          $state=$installer.GetType().InvokeMember('ProductState','GetProperty',$null,$installer,@($code))
+          if ($state -eq 5) { throw 'Old product was not removed' }
+          $app=Join-Path $env:ProgramFiles 'Telezeka'
+          $info=Get-Content "$app/build-info.json" -Raw | ConvertFrom-Json
+          if ($info.commit -ne $env:GITHUB_SHA -or $info.version -ne $env:VERSION) { throw 'Installed application metadata is stale' }
+          foreach ($file in @('telezeka.exe','flutter_windows.dll','data/app.so','data/icudtl.dat')) {
+            if (!(Test-Path "windows-app/$file")) { throw "Missing build file: $file" }
+            if ((Get-FileHash "$app/$file").Hash -ne (Get-FileHash "windows-app/$file").Hash) { throw "Installed stale file: $file" }
+          }
+          $p=Start-Process msiexec.exe -ArgumentList "/x ""$new"" /qn /norestart" -Wait -PassThru
+          if ($p.ExitCode -notin @(0,3010) -or (Test-Path "$app/telezeka.exe")) { throw 'Uninstall test failed' }
+      - name: Preserve build artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telezeka-Windows-current
+          path: |
+            dist/Telezeka-Setup.exe
+            dist/Telezeka-x64.msi
+            dist/Telezeka-Windows.zip
+            windows-app/build-info.json
+            '*-install.log'
+          if-no-files-found: warn
+      - name: Publish verified Windows release
+        shell: pwsh
+        run: |
+          Copy-Item windows-app/build-info.json dist/build-info.json
+          $assets=@('Telezeka-Setup.exe','Telezeka-x64.msi','Telezeka-Windows.zip','build-info.json')
+          $assets | ForEach-Object { "$((Get-FileHash "dist/$_").Hash.ToLower())  $_" } | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+          $tag="v$env:VERSION-windows"
+          $notes="Windows preview $env:VERSION; commit $env:GITHUB_SHA. EXE contains the identical MSI. Upgrade from v0.2 tested. Server deployment still required. Unsigned test software."
+          $paths=@($assets | ForEach-Object {"dist/$_"}) + @('dist/SHA256SUMS.txt')
+          gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag @paths --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --prerelease --title "Telezeka $env:VERSION Windows" --notes "$notes"
+          } else {
+            gh release upload $tag @paths --repo "$env:GITHUB_REPOSITORY" --clobber
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
