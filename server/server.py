@@ -28,6 +28,42 @@ def init():
         for name, typ in [('edited','INTEGER'),('deleted','INTEGER NOT NULL DEFAULT 0'),('reply_to','INTEGER'),('filename','TEXT')]:
             if name not in cols: c.execute(f'ALTER TABLE messages ADD COLUMN {name} {typ}')
 
+        ucols={r['name'] for r in c.execute('PRAGMA table_info(users)')}
+        for name,typ in [('role',"TEXT NOT NULL DEFAULT 'member'"),('banned','INTEGER NOT NULL DEFAULT 0'),('bio',"TEXT NOT NULL DEFAULT ''")]:
+            if name not in ucols: c.execute(f'ALTER TABLE users ADD COLUMN {name} {typ}')
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, actor INTEGER NOT NULL, action TEXT NOT NULL, target INTEGER, created INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS chat_prefs(uid INTEGER REFERENCES users(id),chat INTEGER REFERENCES chats(id),favorite INTEGER NOT NULL DEFAULT 0,archived INTEGER NOT NULL DEFAULT 0,muted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(uid,chat));
+        CREATE TABLE IF NOT EXISTS saved_messages(uid INTEGER REFERENCES users(id),message INTEGER REFERENCES messages(id),PRIMARY KEY(uid,message));
+        CREATE TABLE IF NOT EXISTS blocks(uid INTEGER REFERENCES users(id),blocked INTEGER REFERENCES users(id),PRIMARY KEY(uid,blocked));
+        CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY,reporter INTEGER REFERENCES users(id),message INTEGER REFERENCES messages(id),reason TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',created INTEGER NOT NULL);
+        CREATE UNIQUE INDEX IF NOT EXISTS single_owner ON users(role) WHERE role='owner';
+        """)
+        c.execute("INSERT OR IGNORE INTO settings VALUES('registration','open')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('announcement','')")
+        owner=c.execute("SELECT id FROM users WHERE role='owner'").fetchone()
+        if not owner:
+            p=os.getenv('TELEZEKA_OWNER_PASSWORD','')
+            if len(p)<16 or len(p)>256: raise RuntimeError('Set TELEZEKA_OWNER_PASSWORD (16-256 characters) before first start')
+            if c.execute("SELECT 1 FROM users WHERE username='zakaria' OR email='zakaria@telezeka.local'").fetchone():
+                raise RuntimeError('Reserved owner name/email already exists; resolve manually before migration')
+            salt=secrets.token_hex(16)
+            uid=c.execute("INSERT INTO users(name,username,email,salt,hash,role) VALUES(?,?,?,?,?,'owner')",('Закария','zakaria','zakaria@telezeka.local',salt,password(p,salt))).lastrowid
+            c.execute("INSERT INTO audit(actor,action,target,created) VALUES(?,?,?,?)",(uid,'owner_bootstrap',uid,int(time.time())))
+
+def setting(c,key):
+    return c.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()[0]
+def audit(c,actor,action,target=None):
+    c.execute('INSERT INTO audit(actor,action,target,created) VALUES(?,?,?,?)',(actor,action,target,int(time.time())))
+def blocked(c,a,b):
+    return c.execute('SELECT 1 FROM blocks WHERE (uid=? AND blocked=?) OR (uid=? AND blocked=?)',(a,b,b,a)).fetchone()
+def check_direct(c,u,room):
+    if room['kind']=='direct':
+        other=c.execute('SELECT uid FROM members WHERE chat=? AND uid!=?',(room['id'],u)).fetchone()
+        need(other and not blocked(c,u,other['uid']),'Общение недоступно',403)
+        need(not c.execute('SELECT banned FROM users WHERE id=?',(other['uid'],)).fetchone()['banned'],'Общение недоступно',403)
+
 def message_rows(c,u,ch,where='',params=(),limit=200,descending=False):
     sql="""SELECT m.id,m.sender,m.kind,CASE WHEN m.kind='text' THEN m.body ELSE '' END AS body,m.created,users.name,m.edited,m.deleted,m.reply_to,m.filename,
       CASE WHEN r.deleted=1 THEN 'Сообщение удалено' WHEN r.kind='text' THEN substr(r.body,1,160) ELSE 'Вложение' END AS reply_preview
@@ -43,7 +79,7 @@ def message_rows(c,u,ch,where='',params=(),limit=200,descending=False):
 
 def password(p,s): return hashlib.scrypt(p.encode(),salt=bytes.fromhex(s),n=16384,r=8,p=1,dklen=32).hex()
 def tokenhash(t): return hashlib.sha256(t.encode()).hexdigest()
-def public(r): return {k:r[k] for k in ('id','name','username')}
+def public(r): return {k:r[k] for k in ('id','name','username','role','bio')}
 class Err(Exception):
     def __init__(self,status,msg): self.status=status; self.msg=msg
 
@@ -68,26 +104,80 @@ def run(c,method,path,q,d,auth):
     if method=='POST' and path in ('/register','/login'):
         e=clean(d.get('email'),254).lower(); p=str(d.get('password','')); need(3<=len(e) and '@' in e and 8<=len(p)<=256,'Проверьте email и пароль (от 8 символов)',400)
         if path=='/register':
+            need(setting(c,'registration')=='open','Регистрация закрыта',403)
+            need(e!='zakaria@telezeka.local' and username(d.get('username'))!='zakaria','Имя зарезервировано',409)
             need(bool(INVITE) and hmac.compare_digest(str(d.get('invite','')),INVITE),'Неверный код приглашения'); n=clean(d.get('name')); need(n,'Укажите имя',400); s=secrets.token_hex(16)
             u=c.execute('INSERT INTO users(name,username,email,salt,hash) VALUES(?,?,?,?,?)',(n,username(d.get('username')),e,s,password(p,s))).lastrowid
         else:
-            r=c.execute('SELECT * FROM users WHERE email=?',(e,)).fetchone(); actual=password(p,r['salt'] if r else '0'*32); need(r and hmac.compare_digest(actual,r['hash']),'Неверный email или пароль',401); u=r['id']
+            r=c.execute('SELECT * FROM users WHERE email=?',(e,)).fetchone(); actual=password(p,r['salt'] if r else '0'*32); need(r and hmac.compare_digest(actual,r['hash']),'Неверный email или пароль',401); need(not r['banned'],'Аккаунт заблокирован',403); u=r['id']
         return session(c,u)
-    t=auth.removeprefix('Bearer '); r=c.execute('SELECT uid FROM sessions WHERE token=? AND expires>?',(tokenhash(t),now)).fetchone(); need(r,'Войдите в аккаунт',401); u=r['uid']
+    t=auth.removeprefix('Bearer '); r=c.execute('SELECT sessions.uid,users.role FROM sessions JOIN users ON sessions.uid=users.id WHERE token=? AND expires>? AND users.banned=0',(tokenhash(t),now)).fetchone(); need(r,'Войдите в аккаунт',401); u=r['uid']
+    role=r['role']
+    if path=='/announcement' and method=='GET': return {'text':setting(c,'announcement')}
+    if path=='/me/password' and method=='POST':
+        old=str(d.get('old','')); new=str(d.get('new','')); need(12<=len(new)<=256,'Пароль: от 12 символов',400)
+        a=c.execute('SELECT * FROM users WHERE id=?',(u,)).fetchone(); need(len(old)<=256 and hmac.compare_digest(password(old,a['salt']),a['hash']),'Неверный пароль',403)
+        salt=secrets.token_hex(16); c.execute('UPDATE users SET salt=?,hash=? WHERE id=?',(salt,password(new,salt),u))
+        c.execute('DELETE FROM sessions WHERE uid=? AND token!=?',(u,tokenhash(t))); audit(c,u,'change_password',u); return {'ok':True}
+    if path=='/me/sessions' and method=='POST':
+        c.execute('DELETE FROM sessions WHERE uid=? AND token!=?',(u,tokenhash(t))); return {'ok':True}
+    if path=='/blocks':
+        if method=='GET': return [dict(x) for x in c.execute('SELECT users.id,users.name,users.username FROM blocks JOIN users ON users.id=blocks.blocked WHERE uid=?',(u,))]
+        other=int(d.get('uid',0)); need(other!=u and c.execute('SELECT 1 FROM users WHERE id=?',(other,)),'Пользователь не найден',404)
+        if d.get('blocked',True):
+            c.execute('INSERT OR IGNORE INTO blocks VALUES(?,?)',(u,other)); c.execute("UPDATE calls SET status='ended' WHERE (caller=? AND callee=?) OR (caller=? AND callee=?)",(u,other,other,u))
+        else: c.execute('DELETE FROM blocks WHERE uid=? AND blocked=?',(u,other))
+        return {'ok':True}
+    if path=='/saved' and method=='GET':
+        return [dict(x) for x in c.execute("""SELECT m.id,m.chat,m.kind,CASE WHEN m.kind='text' THEN m.body ELSE '' END AS body,m.filename,m.created
+            FROM saved_messages s JOIN messages m ON s.message=m.id JOIN members ON members.chat=m.chat AND members.uid=s.uid
+            WHERE s.uid=? AND m.deleted=0 ORDER BY m.id DESC LIMIT 200""",(u,))]
+    if route[0]=='admin':
+        need(role=='owner','Только владелец Telezeka',403)
+        if path=='/admin/stats' and method=='GET':
+            return {'users':c.execute('SELECT COUNT(*) FROM users').fetchone()[0],'banned':c.execute('SELECT COUNT(*) FROM users WHERE banned=1').fetchone()[0],
+              'groups':c.execute("SELECT COUNT(*) FROM chats WHERE kind='group'").fetchone()[0],'channels':c.execute("SELECT COUNT(*) FROM chats WHERE kind='channel'").fetchone()[0],
+              'messages':c.execute('SELECT COUNT(*) FROM messages WHERE deleted=0').fetchone()[0],'registration':setting(c,'registration'),'announcement':setting(c,'announcement')}
+        if path=='/admin/users' and method=='GET':
+            return [dict(x) for x in c.execute('SELECT id,name,username,role,banned FROM users ORDER BY id LIMIT 1000')]
+        if path=='/admin/ban' and method=='POST':
+            target=int(d.get('uid',0)); a=c.execute('SELECT role FROM users WHERE id=?',(target,)).fetchone(); need(a and a['role']!='owner','Нельзя заблокировать владельца',403)
+            ban=int(bool(d.get('banned',True))); c.execute('UPDATE users SET banned=? WHERE id=?',(ban,target))
+            if ban:
+                c.execute('DELETE FROM sessions WHERE uid=?',(target,)); c.execute("UPDATE calls SET status='ended' WHERE caller=? OR callee=?",(target,target))
+            audit(c,u,'ban' if ban else 'unban',target); return {'ok':True}
+        if path=='/admin/settings' and method=='POST':
+            if 'registration' in d:
+                need(d['registration'] in ('open','closed'),'Неверный режим',400); c.execute("UPDATE settings SET value=? WHERE key='registration'",(d['registration'],))
+            if 'announcement' in d: c.execute("UPDATE settings SET value=? WHERE key='announcement'",(clean(d['announcement'],1000),))
+            audit(c,u,'settings'); return {'ok':True}
+        if path=='/admin/rooms' and method=='GET':
+            return [dict(x) for x in c.execute("SELECT id,title,kind,owner,(SELECT COUNT(*) FROM members WHERE chat=chats.id) AS member_count FROM chats WHERE kind!='direct' ORDER BY id LIMIT 1000")]
+        if path=='/admin/room_rename' and method=='POST':
+            target=int(d.get('chat',0)); title=clean(d.get('title')); need(title,'Укажите название',400)
+            need(c.execute("SELECT 1 FROM chats WHERE id=? AND kind!='direct'",(target,)),'Группа или канал не найдены',404)
+            c.execute('UPDATE chats SET title=? WHERE id=?',(title,target)); audit(c,u,'room_rename',target); return {'ok':True}
+        if path=='/admin/audit' and method=='GET':
+            return [dict(x) for x in c.execute('SELECT * FROM audit ORDER BY id DESC LIMIT 200')]
+        if path=='/admin/reports' and method=='GET':
+            return [dict(x) for x in c.execute('SELECT reports.id,reporter,message,reason,status,created FROM reports ORDER BY id DESC LIMIT 200')]
+        if path=='/admin/report_close' and method=='POST':
+            target=int(d.get('id',0)); c.execute("UPDATE reports SET status='closed' WHERE id=?",(target,)); audit(c,u,'report_close',target); return {'ok':True}
+        raise Err(404,'Не найдено')
     if path=='/logout' and method=='POST': c.execute('DELETE FROM sessions WHERE token=?',(tokenhash(t),)); return {'ok':True}
     if path=='/me':
         if method=='POST':
-            n=clean(d.get('name')); need(n,'Укажите имя',400); c.execute('UPDATE users SET name=?,username=? WHERE id=?',(n,username(d.get('username')),u))
+            n=clean(d.get('name')); un=username(d.get('username')); need(n,'Укажите имя',400); need(un!='zakaria' or role=='owner','Имя зарезервировано',409); c.execute('UPDATE users SET name=?,username=?,bio=COALESCE(?,bio) WHERE id=?',(n,un,clean(d['bio'],200) if 'bio' in d else None,u))
         return public(c.execute('SELECT * FROM users WHERE id=?',(u,)).fetchone())
     if path=='/chats':
         if method=='GET':
             rows=c.execute('SELECT chats.* FROM chats JOIN members ON chats.id=members.chat WHERE members.uid=? ORDER BY COALESCE((SELECT MAX(id) FROM messages WHERE chat=chats.id),0) DESC,chats.id DESC',(u,)).fetchall(); out=[]
             for x in rows:
-                a=dict(x); people=c.execute('SELECT users.id,users.name,users.username FROM users JOIN members ON users.id=members.uid WHERE members.chat=?',(x['id'],)).fetchall(); a['members']=[dict(y) for y in people]; a['title']=next((y['name'] for y in people if y['id']!=u),'Личный чат') if x['kind']=='direct' else x['title']; a.pop('direct_key',None); a['unread']=c.execute('SELECT COUNT(*) FROM messages WHERE chat=? AND sender!=? AND deleted=0 AND id>COALESCE((SELECT last_id FROM read_marks WHERE chat=? AND uid=?),0)',(x['id'],u,x['id'],u)).fetchone()[0]; pin=c.execute('SELECT m.id,m.kind,m.body FROM pins JOIN messages m ON pins.message=m.id WHERE pins.chat=? AND m.deleted=0',(x['id'],)).fetchone(); a['pin']=dict(id=pin['id'],preview=pin['body'][:160] if pin['kind']=='text' else 'Вложение') if pin else None; out.append(a)
+                a=dict(x); people=c.execute('SELECT users.id,users.name,users.username FROM users JOIN members ON users.id=members.uid WHERE members.chat=?',(x['id'],)).fetchall(); a['members']=[dict(y) for y in people]; a['title']=next((y['name'] for y in people if y['id']!=u),'Личный чат') if x['kind']=='direct' else x['title']; a.pop('direct_key',None); pref=c.execute('SELECT favorite,archived,muted FROM chat_prefs WHERE uid=? AND chat=?',(u,x['id'])).fetchone(); a.update(dict(pref) if pref else {'favorite':0,'archived':0,'muted':0}); a['unread']=c.execute('SELECT COUNT(*) FROM messages WHERE chat=? AND sender!=? AND deleted=0 AND id>COALESCE((SELECT last_id FROM read_marks WHERE chat=? AND uid=?),0)',(x['id'],u,x['id'],u)).fetchone()[0]; pin=c.execute('SELECT m.id,m.kind,m.body FROM pins JOIN messages m ON pins.message=m.id WHERE pins.chat=? AND m.deleted=0',(x['id'],)).fetchone(); a['pin']=dict(id=pin['id'],preview=pin['body'][:160] if pin['kind']=='text' else 'Вложение') if pin else None; out.append(a)
             return out
         k=d.get('kind'); need(k in ('direct','group','channel'),'Неверный тип',400)
         if k=='direct':
-            other=peer(c,d.get('username'))['id']; need(other!=u,'Выберите другого пользователя',400); key=':'.join(map(str,sorted([u,other]))); old=c.execute('SELECT id FROM chats WHERE direct_key=?',(key,)).fetchone()
+            other=peer(c,d.get('username'))['id']; need(other!=u,'Выберите другого пользователя',400); need(not blocked(c,u,other),'Общение недоступно',403); key=':'.join(map(str,sorted([u,other]))); old=c.execute('SELECT id FROM chats WHERE direct_key=?',(key,)).fetchone()
             if old:return {'id':old['id']}
             ch=c.execute('INSERT INTO chats(title,kind,owner,direct_key) VALUES(?,?,?,?)',('',k,u,key)).lastrowid; c.execute('INSERT INTO members VALUES(?,?)',(ch,other))
         else:
@@ -95,6 +185,14 @@ def run(c,method,path,q,d,auth):
         c.execute('INSERT INTO members VALUES(?,?)',(ch,u)); return {'id':ch}
     if len(route)==3 and route[0]=='chats':
         ch=int(route[1]); room=member(c,u,ch); action=route[2]
+        if action=='prefs' and method=='POST':
+            c.execute('INSERT OR IGNORE INTO chat_prefs(uid,chat) VALUES(?,?)',(u,ch))
+            for key in ('favorite','archived','muted'):
+                if key in d: c.execute(f'UPDATE chat_prefs SET {key}=? WHERE uid=? AND chat=?',(int(bool(d[key])),u,ch))
+            return {'ok':True}
+        if action=='leave' and method=='POST':
+            need(room['kind']!='direct' and room['owner']!=u,'Владелец или участник личного чата не может выйти',400)
+            c.execute('DELETE FROM members WHERE chat=? AND uid=?',(ch,u)); return {'ok':True}
         if action=='invite' and method=='POST':
             need(room['owner']==u and room['kind']!='direct'); other=peer(c,d.get('username'))['id']; c.execute('INSERT OR IGNORE INTO members VALUES(?,?)',(ch,other)); return {'ok':True}
         if action=='messages':
@@ -102,7 +200,7 @@ def run(c,method,path,q,d,auth):
                 if 'recent' in q: return message_rows(c,u,ch,limit=200,descending=True)
                 if 'before' in q: return message_rows(c,u,ch,'AND m.id<?',(int(q['before'][0]),),descending=True)
                 return message_rows(c,u,ch,'AND m.id>?',(int(q.get('after',['0'])[0]),),limit=100)
-            need(method=='POST' and (room['kind']!='channel' or room['owner']==u)); k=d.get('kind','text'); b=str(d.get('body','')); need(k in ('text','voice','circle','file','photo'),'Неверный тип',400)
+            need(method=='POST' and (room['kind']!='channel' or room['owner']==u)); check_direct(c,u,room); k=d.get('kind','text'); b=str(d.get('body','')); need(k in ('text','voice','circle','file','photo'),'Неверный тип',400)
             reply=d.get('reply_to'); filename=None
             if reply is not None: need(c.execute('SELECT 1 FROM messages WHERE chat=? AND id=? AND deleted=0',(ch,int(reply))).fetchone(),'Ответ на недоступное сообщение',400)
             if k in ('file','photo'):
@@ -130,9 +228,17 @@ def run(c,method,path,q,d,auth):
                 need(c.execute('SELECT 1 FROM messages WHERE chat=? AND id=? AND deleted=0',(ch,int(mid))).fetchone(),'Сообщение не найдено',404); c.execute('INSERT INTO pins VALUES(?,?) ON CONFLICT(chat) DO UPDATE SET message=excluded.message',(ch,int(mid)))
             return {'ok':True}
         if action=='call' and method=='POST':
-            need(room['kind']=='direct','Звонки только в личных чатах',400); other=c.execute('SELECT uid FROM members WHERE chat=? AND uid!=?',(ch,u)).fetchone()['uid']; c.execute("UPDATE calls SET status='ended' WHERE status IN ('ringing','active') AND (caller IN (?,?) OR callee IN (?,?)) AND created<?",(u,other,u,other,now-7200)); need(not c.execute("SELECT id FROM calls WHERE status IN ('ringing','active') AND (caller IN (?,?) OR callee IN (?,?)) AND (status='active' OR created>?)",(u,other,u,other,now-60)).fetchone(),'Абонент занят',409); cid=c.execute('INSERT INTO calls(chat,caller,callee,video,status,created) VALUES(?,?,?,?,?,?)',(ch,u,other,int(bool(d.get('video'))),'ringing',now)).lastrowid; return {'id':cid}
+            need(room['kind']=='direct','Звонки только в личных чатах',400); check_direct(c,u,room); other=c.execute('SELECT uid FROM members WHERE chat=? AND uid!=?',(ch,u)).fetchone()['uid']; c.execute("UPDATE calls SET status='ended' WHERE status IN ('ringing','active') AND (caller IN (?,?) OR callee IN (?,?)) AND created<?",(u,other,u,other,now-7200)); need(not c.execute("SELECT id FROM calls WHERE status IN ('ringing','active') AND (caller IN (?,?) OR callee IN (?,?)) AND (status='active' OR created>?)",(u,other,u,other,now-60)).fetchone(),'Абонент занят',409); cid=c.execute('INSERT INTO calls(chat,caller,callee,video,status,created) VALUES(?,?,?,?,?,?)',(ch,u,other,int(bool(d.get('video'))),'ringing',now)).lastrowid; return {'id':cid}
     if len(route)==3 and route[0]=='messages' and method=='POST':
         mid=int(route[1]); m=c.execute('SELECT * FROM messages WHERE id=?',(mid,)).fetchone(); need(m); room=member(c,u,m['chat']); need(not m['deleted'],'Сообщение удалено',404); act=route[2]
+        if act=='save':
+            if d.get('saved',True): c.execute('INSERT OR IGNORE INTO saved_messages VALUES(?,?)',(u,mid))
+            else: c.execute('DELETE FROM saved_messages WHERE uid=? AND message=?',(u,mid))
+            return {'ok':True}
+        if act=='report':
+            reason=clean(d.get('reason'),500); need(reason,'Укажите причину',400)
+            need(not c.execute("SELECT 1 FROM reports WHERE reporter=? AND message=? AND status='open'",(u,mid)),'Жалоба уже отправлена',409)
+            c.execute('INSERT INTO reports(reporter,message,reason,created) VALUES(?,?,?,?)',(u,mid,reason,now)); return {'ok':True}
         if act=='edit':
             need(m['sender']==u and m['kind']=='text'); b=str(d.get('body','')).strip(); need(0<len(b)<=12000,'Введите сообщение',400); c.execute('UPDATE messages SET body=?,edited=? WHERE id=?',(b,now,mid)); return {'ok':True}
         if act=='delete':
