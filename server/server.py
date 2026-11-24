@@ -118,10 +118,10 @@ def contact(value):
     need(re.fullmatch(r'\+[1-9][0-9]{7,14}',v) and (not v.startswith('+7') or len(v)==12),'Введите телефон, например +7 (978) 000 00 00',400)
     return 'phone',v
 
-def otp_digest(kind,target,code):
+def otp_digest(kind,target,code,purpose='register'):
     secret=os.getenv('TELEZEKA_OTP_SECRET','')
     need(len(secret)>=32,'Сервис подтверждения ещё не настроен',503)
-    return hmac.new(secret.encode(),f'{kind}:{target}:{code}'.encode(),hashlib.sha256).hexdigest()
+    return hmac.new(secret.encode(),f'{purpose}:{kind}:{target}:{code}'.encode(),hashlib.sha256).hexdigest()
 
 def deliver_code(kind,target,code):
     message=f'Код Telezeka: {code}. Действует 5 минут. Никому не сообщайте.'
@@ -153,9 +153,17 @@ def invite_check(c,d):
     need(setting(c,'registration')=='open','Регистрация закрыта',403)
     need(bool(INVITE) and hmac.compare_digest(str(d.get('invite','')),INVITE),'Неверный код приглашения')
 
-def send_registration_code(c,d,now):
-    invite_check(c,d); kind,target=contact(d.get('contact')); code=f'{secrets.randbelow(1000000):06d}'
-    digest=otp_digest(kind,target,code)
+def send_registration_code(c,d,now,purpose='register'):
+    if purpose=='register': invite_check(c,d)
+    kind,target=contact(d.get('contact')); code=f'{secrets.randbelow(1000000):06d}'
+    digest=otp_digest(kind,target,code,purpose)
+    storage_key=target if purpose=='register' else 'login:'+target
+    if purpose=='login':
+        field='phone' if kind=='phone' else 'email'
+        verified=field+'_verified'
+        # Send codes only to verified contacts; do not reveal account existence.
+        account=c.execute(f"SELECT id FROM users WHERE {field}=? AND {verified}=1 AND banned=0 AND role!='owner'",(target,)).fetchone()
+    else: account=True
     c.execute('BEGIN IMMEDIATE')
     c.execute('DELETE FROM verification_sends WHERE created<?',(now-86400,))
     c.execute('DELETE FROM registration_codes WHERE expires<?',(now-86400,))
@@ -164,24 +172,35 @@ def send_registration_code(c,d,now):
     last=c.execute('SELECT MAX(created) FROM verification_sends WHERE target=?',(target,)).fetchone()[0]
     need(last is None or now-last>=60,'Повторная отправка через 60 секунд',429)
     c.execute('INSERT INTO verification_sends(target,created) VALUES(?,?)',(target,now))
-    c.execute('INSERT INTO registration_codes(target,digest,created,expires,attempts) VALUES(?,?,?,?,0) ON CONFLICT(target) DO UPDATE SET digest=excluded.digest,created=excluded.created,expires=excluded.expires,attempts=0',(target,digest,now,now+300))
+    c.execute('INSERT INTO registration_codes(target,digest,created,expires,attempts) VALUES(?,?,?,?,0) ON CONFLICT(target) DO UPDATE SET digest=excluded.digest,created=excluded.created,expires=excluded.expires,attempts=0',(storage_key,digest,now,now+300))
     c.commit()
-    try: deliver_code(kind,target,code)
+    try:
+        if account: deliver_code(kind,target,code)
     except Exception:
-        c.execute('DELETE FROM registration_codes WHERE target=? AND digest=?',(target,digest)); c.commit(); raise
+        c.execute('DELETE FROM registration_codes WHERE target=? AND digest=?',(storage_key,digest)); c.commit(); raise
     return {'ok':True,'expires_in':300,'resend_after':60}
 
-def check_registration_code(c,kind,target,code,now):
-    r=c.execute('SELECT * FROM registration_codes WHERE target=?',(target,)).fetchone()
+def check_registration_code(c,kind,target,code,now,purpose='register'):
+    storage_key=target if purpose=='register' else 'login:'+target
+    r=c.execute('SELECT * FROM registration_codes WHERE target=?',(storage_key,)).fetchone()
     need(r and r['expires']>=now and r['attempts']<5,'Код истёк или исчерпаны попытки. Запросите новый.',400)
-    if not re.fullmatch(r'[0-9]{6}',str(code or '')) or not hmac.compare_digest(r['digest'],otp_digest(kind,target,str(code))):
-        c.execute('UPDATE registration_codes SET attempts=attempts+1 WHERE target=?',(target,)); c.commit()
+    if not re.fullmatch(r'[0-9]{6}',str(code or '')) or not hmac.compare_digest(r['digest'],otp_digest(kind,target,str(code),purpose)):
+        c.execute('UPDATE registration_codes SET attempts=attempts+1 WHERE target=?',(storage_key,)); c.commit()
         raise Err(400,'Неверный код')
 
 def run(c,method,path,q,d,auth):
     now=int(time.time()); route=path.strip('/').split('/')
     if path=='/health': return {'ok':True}
     if method=='POST' and path=='/auth/send-code': return send_registration_code(c,d,now)
+    if method=='POST' and path=='/auth/login-code': return send_registration_code(c,d,now,'login')
+    if method=='POST' and path=='/auth/verify-login':
+        kind,target=contact(d.get('contact')); c.execute('BEGIN IMMEDIATE')
+        check_registration_code(c,kind,target,d.get('code'),now,'login')
+        field='phone' if kind=='phone' else 'email'
+        r=c.execute(f"SELECT * FROM users WHERE {field}=? AND {field}_verified=1 AND banned=0 AND role!='owner'",(target,)).fetchone()
+        need(r,'Неверный или истёкший код',401)
+        c.execute('DELETE FROM registration_codes WHERE target=?',('login:'+target,))
+        return session(c,r['id'])
     if method=='POST' and path in ('/register','/login'):
         p=str(d.get('password','')); need(8<=len(p)<=256,'Пароль: от 8 символов',400)
         raw=str(d.get('contact') or d.get('email') or '').strip()
@@ -388,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed=urlparse(self.path); d={}; size=int(self.headers.get('Content-Length','0')); need(0<=size<=LIMIT,'Слишком большой запрос',413)
             if size: d=json.loads(self.rfile.read(size)); need(isinstance(d,dict),'Некорректный запрос',400)
-            if method=='POST' and parsed.path in ('/register','/login','/auth/send-code'): check_auth_limit(d.get('contact') or d.get('email'))
+            if method=='POST' and parsed.path in ('/register','/login','/auth/send-code','/auth/login-code','/auth/verify-login'): check_auth_limit(d.get('contact') or d.get('email'))
             with closing(db()) as c,c: result=run(c,method,parsed.path,parse_qs(parsed.query),d,self.headers.get('Authorization',''))
             self.reply(200,result)
         except Err as e:self.reply(e.status,{'error':e.msg})
