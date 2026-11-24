@@ -308,6 +308,8 @@ def run(c,method,path,q,d,auth):
         c.execute('INSERT INTO members VALUES(?,?)',(ch,u)); return {'id':ch}
     if len(route)==3 and route[0]=='chats':
         ch=int(route[1]); room=member(c,u,ch); action=route[2]
+        if action=='files' and method=='GET':
+            return [dict(x) for x in c.execute("SELECT id,kind,filename,created FROM messages WHERE chat=? AND deleted=0 AND kind IN ('file','photo','voice','circle') ORDER BY id DESC LIMIT 200",(ch,))]
         if action=='prefs' and method=='POST':
             c.execute('INSERT OR IGNORE INTO chat_prefs(uid,chat) VALUES(?,?)',(u,ch))
             for key in ('favorite','archived','muted'):
@@ -354,6 +356,14 @@ def run(c,method,path,q,d,auth):
             need(room['kind']=='direct','Звонки только в личных чатах',400); check_direct(c,u,room); other=c.execute('SELECT uid FROM members WHERE chat=? AND uid!=?',(ch,u)).fetchone()['uid']; c.execute("UPDATE calls SET status='ended' WHERE status IN ('ringing','active') AND (caller IN (?,?) OR callee IN (?,?)) AND created<?",(u,other,u,other,now-7200)); need(not c.execute("SELECT id FROM calls WHERE status IN ('ringing','active') AND (caller IN (?,?) OR callee IN (?,?)) AND (status='active' OR created>?)",(u,other,u,other,now-60)).fetchone(),'Абонент занят',409); cid=c.execute('INSERT INTO calls(chat,caller,callee,video,status,created) VALUES(?,?,?,?,?,?)',(ch,u,other,int(bool(d.get('video'))),'ringing',now)).lastrowid; return {'id':cid}
     if len(route)==3 and route[0]=='messages' and method=='POST':
         mid=int(route[1]); m=c.execute('SELECT * FROM messages WHERE id=?',(mid,)).fetchone(); need(m); room=member(c,u,m['chat']); need(not m['deleted'],'Сообщение удалено',404); act=route[2]
+        if act=='forward':
+            target=int(d.get('chat',0)); dest=member(c,u,target)
+            need(dest['kind']!='channel' or dest['owner']==u)
+            check_direct(c,u,dest)
+            need(m['kind'] in ('text','voice','circle','file','photo'),'Нельзя переслать этот тип сообщения',400)
+            # Forward a copy, not a link to the private original or its author.
+            fid=c.execute('INSERT INTO messages(chat,sender,kind,body,created,filename) VALUES(?,?,?,?,?,?)',(target,u,m['kind'],m['body'],now,m['filename'])).lastrowid
+            return {'id':fid}
         if act=='save':
             if d.get('saved',True): c.execute('INSERT OR IGNORE INTO saved_messages VALUES(?,?)',(u,mid))
             else: c.execute('DELETE FROM saved_messages WHERE uid=? AND message=?',(u,mid))
