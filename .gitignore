@@ -1,0 +1,5 @@
+build_app/
+*.db
+*.db-*
+__pycache__/
+.env
