@@ -86,6 +86,16 @@ def main():
     for k,v in [("WixUIBannerBmp","banner.bmp"),("WixUIDialogBmp","dialog.bmp"),("WixUILicenseRtf","notice.rtf")]:
         node(pkg,"WixVariable",Id=k,Value=work/v)
     node(pkg,"Property",Id="WIXUI_EXITDIALOGOPTIONALTEXT",Value="Telezeka установлена. Откройте приложение из меню «Пуск».")
+    # The final screen checkbox runs a small embedded helper in the installing user's context.
+    helper=work/"DesktopShortcut.exe"
+    csc=Path(os.environ["WINDIR"])/"Microsoft.NET"/"Framework64"/"v4.0.30319"/"csc.exe"
+    subprocess.run([str(csc),"/nologo","/target:winexe","/optimize+","/reference:Microsoft.CSharp.dll","/reference:System.Windows.Forms.dll","/out:"+str(helper),str(Path(__file__).with_name("DesktopShortcut.cs"))],check=True)
+    node(pkg,"Binary",Id="DesktopShortcutHelper",SourceFile=helper)
+    node(pkg,"CustomAction",Id="CreateDesktopShortcut",BinaryRef="DesktopShortcutHelper",ExeCommand='"[#'+ident("F",Path("telezeka.exe"))+']"',Execute="immediate",Impersonate="yes",Return="ignore")
+    node(pkg,"Property",Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT",Value="Создать ярлык на рабочем столе")
+    node(pkg,"Property",Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX",Value="1")
+    ui=node(pkg,"UI")
+    node(ui,"Publish",Dialog="ExitDialog",Control="Finish",Event="DoAction",Value="CreateDesktopShortcut",Order="1",Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed")
     wxs=work/"Telezeka.wxs";E.indent(root);E.ElementTree(root).write(wxs,encoding="utf-8",xml_declaration=True)
     subprocess.run(["wix","build","-arch","x64","-culture","ru-RU","-ext","WixToolset.UI.wixext",str(wxs),"-o",str(target)],check=True)
     if not target.is_file(): raise SystemExit("MSI not created")
