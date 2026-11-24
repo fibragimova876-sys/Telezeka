@@ -1,0 +1,28 @@
+name: Rust core integration
+on:
+  push:
+    paths:
+      - rust-core/**
+      - Dockerfile.rust
+      - scripts/run_hybrid.py
+      - server/**
+      - .github/workflows/rust-core.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: rust-core-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo build --release --manifest-path rust-core/Cargo.toml
+      - run: python -m unittest discover -s server -v
+      - run: python scripts/test_rust_core.py
+      - run: docker build -f Dockerfile.rust -t telezeka-core:test .
