@@ -1,5 +1,6 @@
 """Create a branded, native WiX MSI from a complete Flutter Windows release."""
-import argparse, hashlib, os, subprocess, uuid
+import argparse, hashlib, os, subprocess, uuid, base64
+from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree as E
 from PIL import Image, ImageDraw, ImageFont
@@ -14,13 +15,16 @@ def ident(prefix,path):
 def font(size,bold=False):
     return ImageFont.truetype(str(Path(os.environ["WINDIR"])/"Fonts"/("segoeuib.ttf" if bold else "segoeui.ttf")),size)
 def logo(draw,cx,cy,scale=1):
-    def pt(x,y): return (round(cx+x*scale),round(cy+y*scale))
-    draw.rounded_rectangle([pt(-27,-27),pt(27,27)],radius=round(13*scale),fill="#376B60")
-    draw.polygon([pt(-15,-3),pt(17,-14),pt(10,16),pt(2,7),pt(-6,12),pt(-4,3)],fill="#FFFFFF")
-    draw.line([pt(-4,3),pt(10,-6),pt(2,7)],fill="#B7E2F5",width=max(1,round(2*scale)))
+    # Same generated mark used by the Flutter app and all native launchers.
+    asset=Path(__file__).resolve().parents[1]/"client/assets/brand.png.b64"
+    mark=Image.open(BytesIO(base64.b64decode(asset.read_text(),validate=True))).convert("RGBA")
+    size=max(1,round(54*scale))
+    factor=size/max(mark.size)
+    mark=mark.resize((max(1,round(mark.width*factor)),max(1,round(mark.height*factor))),Image.Resampling.LANCZOS)
+    draw._image.paste(mark,(round(cx-mark.width/2),round(cy-mark.height/2)),mark)
 def brand(out):
     b=Image.new("RGB",(493,58),"#FFFFFF"); d=ImageDraw.Draw(b)
-    d.rectangle((0,55,493,57),fill="#1686BE")
+    d.rectangle((0,55,493,57),fill="#226B55")
     logo(d,355,27,.48); d.text((376,12),"Telezeka",font=font(19,True),fill="#193D35")
     d.text((377,35),"WINDOWS SETUP",font=font(8),fill="#63798F")
     b.save(out/"banner.bmp")
@@ -28,7 +32,7 @@ def brand(out):
     d.rectangle((0,0,163,312),fill="#142C29")
     d.ellipse((-105,163,176,444),outline="#34534D",width=1)
     d.ellipse((-88,185,158,431),outline="#34534D",width=1)
-    d.rectangle((0,0,163,5),fill="#1686BE")
+    d.rectangle((0,0,163,5),fill="#226B55")
     logo(d,82,87,1.2)
     d.text((82,133),"Telezeka",anchor="mt",font=font(24,True),fill="#FFFFFF")
     d.text((82,169),"GLOBAL",anchor="mt",font=font(12),fill="#B0D8C6")
