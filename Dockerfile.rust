@@ -1,0 +1,14 @@
+FROM rust:1.92-bookworm AS build
+WORKDIR /build
+COPY rust-core/ ./
+RUN cargo build --release
+FROM python:3.12-slim-bookworm
+ENV PYTHONUNBUFFERED=1 CHAT_HOST=0.0.0.0 CHAT_PORT=8080 CHAT_DB=/data/chat.db
+RUN groupadd -g 10001 telezeka && useradd -u 10001 -g 10001 -M telezeka && mkdir /data && chown 10001:10001 /data
+WORKDIR /app
+COPY server/server.py /app/server.py
+COPY scripts/run_hybrid.py /app/run_hybrid.py
+COPY --from=build /build/target/release/telezeka-core /usr/local/bin/telezeka-core
+USER 10001:10001
+EXPOSE 8080
+CMD ["python","/app/run_hybrid.py"]
