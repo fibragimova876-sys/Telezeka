@@ -9,6 +9,6 @@ WORKDIR /app
 COPY server/server.py /app/server.py
 COPY scripts/run_hybrid.py /app/run_hybrid.py
 COPY --from=build /build/target/release/telezeka-core /usr/local/bin/telezeka-core
-USER 10001:10001
+COPY scripts/volume_entrypoint.py /app/volume_entrypoint.py
 EXPOSE 8080
-CMD ["python","/app/run_hybrid.py"]
+CMD ["python","/app/volume_entrypoint.py"]
