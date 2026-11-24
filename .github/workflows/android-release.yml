@@ -23,7 +23,35 @@ jobs:
         with:
           flutter-version: '3.50.1'
           channel: stable
-      - run: sdkmanager "platforms;android-36"
+      - name: Locate installed Android SDK
+        id: sdk
+        shell: bash
+        run: |
+          for root in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" /usr/local/lib/android/sdk "$HOME/Android/Sdk"; do
+            if [[ -n "$root" && -f "$root/platforms/android-36/android.jar" ]]; then
+              echo "ANDROID_HOME=$root" >> "$GITHUB_ENV"
+              echo "ANDROID_SDK_ROOT=$root" >> "$GITHUB_ENV"
+              echo "ready=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+      - uses: android-actions/setup-android@v3
+        if: steps.sdk.outputs.ready != 'true'
+      - name: Install Android API 36 if missing
+        if: steps.sdk.outputs.ready != 'true'
+        shell: bash
+        run: |
+          root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          manager="$(command -v sdkmanager || true)"
+          if [[ -z "$manager" ]]; then
+            manager="$(find "$root/cmdline-tools" -type f -name sdkmanager -print -quit)"
+          fi
+          test -x "$manager"
+          "$manager" --sdk_root="$root" "platforms;android-36"
+          test -f "$root/platforms/android-36/android.jar"
+          echo "ANDROID_HOME=$root" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$root" >> "$GITHUB_ENV"
       - run: python scripts/prepare.py
       - run: flutter pub get
         working-directory: build_app
