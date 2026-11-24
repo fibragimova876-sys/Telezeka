@@ -1,4 +1,5 @@
 import os, tempfile, unittest
+from unittest.mock import patch
 from contextlib import closing
 import server as s
 class Permissions(unittest.TestCase):
@@ -6,9 +7,13 @@ class Permissions(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory()
         s.DB=os.path.join(self.tmp.name,'test.db'); s.INVITE='test-invite'
         os.environ['TELEZEKA_OWNER_PASSWORD']='test-password-123456789'
+        os.environ['TELEZEKA_OTP_SECRET']='test-only-otp-secret-0123456789abcdef'
         s.init(); s.init()
         self.owner=self.call('POST','/login',{'email':'zakaria@telezeka.local','password':'test-password-123456789'})
-        self.member=self.call('POST','/register',{'name':'Member','username':'member1','email':'member@example.test','password':'member-test-password','invite':s.INVITE})
+        with patch.object(s,'deliver_code') as delivery:
+            self.call('POST','/auth/send-code',{'contact':'member@example.test','invite':s.INVITE})
+            code=delivery.call_args.args[2]
+        self.member=self.call('POST','/register',{'name':'Member','username':'member1','email':'member@example.test','password':'member-test-password','invite':s.INVITE,'code':code})
     def tearDown(self): self.tmp.cleanup()
     def call(self,method,path,body=None,token=''):
         with closing(s.db()) as c,c:
