@@ -60,4 +60,22 @@ class Permissions(unittest.TestCase):
             with self.assertRaises(s.Err): self.call('POST','/register',data)
         data['code']=code
         with self.assertRaises(s.Err): self.call('POST','/register',data)
+    def test_passwordless_login(self):
+        email='otp@example.test'
+        with patch.object(s,'deliver_code') as delivery:
+            self.call('POST','/auth/send-code',{'contact':email,'invite':s.INVITE})
+            register_code=delivery.call_args.args[2]
+            user=self.call('POST','/register',{'name':'OTP','contact':email,'invite':s.INVITE,'code':register_code})
+            with self.assertRaises(s.Err): self.call('POST','/auth/verify-login',{'contact':email,'code':register_code})
+            with closing(s.db()) as c,c:
+                c.execute("UPDATE verification_sends SET created=created-61 WHERE target=?",(email,))
+            self.call('POST','/auth/login-code',{'contact':email})
+            login_code=delivery.call_args.args[2]
+            logged=self.call('POST','/auth/verify-login',{'contact':email,'code':login_code})
+            self.assertEqual(logged['user']['id'],user['user']['id'])
+            with self.assertRaises(s.Err): self.call('POST','/auth/verify-login',{'contact':email,'code':login_code})
+            delivery.reset_mock()
+            self.call('POST','/auth/login-code',{'contact':'unknown@example.test'})
+            delivery.assert_not_called()
+        with self.assertRaises(s.Err): self.call('POST','/auth/login-code',{'contact':'zakaria@telezeka.local'})
 if __name__=='__main__': unittest.main()
