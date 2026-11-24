@@ -56,6 +56,14 @@ jobs:
           '@ | Set-Content -Encoding utf8 installer.iss
           & $iscc installer.iss
           if ($LASTEXITCODE -ne 0 -or !(Test-Path 'Telezeka-Setup.exe')) { throw 'Installer compilation failed' }
+      - name: Save ready Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telezeka-Windows-Installer
+          path: |
+            Telezeka-Setup.exe
+            Telezeka-Windows.zip
+          if-no-files-found: error
       - name: Publish preview release
         if: always() && steps.download.outcome != 'failure'
         shell: pwsh
