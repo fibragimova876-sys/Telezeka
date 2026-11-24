@@ -52,7 +52,8 @@ def init():
         owner=c.execute("SELECT id FROM users WHERE role='owner'").fetchone()
         if not owner:
             p=os.getenv('TELEZEKA_OWNER_PASSWORD','')
-            if len(p)<16 or len(p)>256: raise RuntimeError('Set TELEZEKA_OWNER_PASSWORD (16-256 characters) before first start')
+            minimum=8 if os.getenv('TELEZEKA_OWNER_ALLOW_SHORT_PASSWORD')=='1' else 16
+            if not minimum<=len(p)<=256: raise RuntimeError('Set TELEZEKA_OWNER_PASSWORD before first start; use 16 or more characters unless explicitly opting into a shorter password')
             if c.execute("SELECT 1 FROM users WHERE username='zakaria' OR email='zakaria@telezeka.local'").fetchone():
                 raise RuntimeError('Reserved owner name/email already exists; resolve manually before migration')
             salt=secrets.token_hex(16)
