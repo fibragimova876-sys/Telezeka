@@ -1,83 +1,9 @@
-name: Publish Telezeka Windows preview
-on:
-  push:
-    paths:
-      - .github/workflows/publish-windows-preview.yml
-  workflow_dispatch:
+name: Retired Windows preview publisher
+on: workflow_dispatch
 permissions:
-  contents: write
-  actions: read
-concurrency:
-  group: telezeka-windows-preview
-  cancel-in-progress: false
+  contents: read
 jobs:
-  publish:
-    runs-on: windows-latest
+  retired:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        id: download
-        with:
-          name: telezeka-windows
-          run-id: 45375312782
-          github-token: ${{ github.token }}
-          path: windows-app
-      - name: Package portable application
-        shell: pwsh
-        run: |
-          if (!(Test-Path 'windows-app\telezeka.exe')) { throw 'Built application missing' }
-          Compress-Archive -Path 'windows-app\*' -DestinationPath 'Telezeka-Windows.zip' -Force
-      - name: Build installer
-        shell: pwsh
-        run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (!(Test-Path $iscc)) {
-            choco install innosetup -y --no-progress
-            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
-          }
-          @'
-          [Setup]
-          AppId=TelezekaPreview
-          AppName=Telezeka
-          AppVersion=0.2.0-preview
-          DefaultDirName={localappdata}\Programs\Telezeka
-          DefaultGroupName=Telezeka
-          PrivilegesRequired=lowest
-          OutputDir=.
-          OutputBaseFilename=Telezeka-Setup
-          Compression=lzma2
-          SolidCompression=yes
-          [Files]
-          Source: "windows-app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-          [Icons]
-          Name: "{group}\Telezeka"; Filename: "{app}\telezeka.exe"
-          [Run]
-          Filename: "{app}\telezeka.exe"; Description: "Launch Telezeka"; Flags: nowait postinstall skipifsilent
-          '@ | Set-Content -Encoding utf8 installer.iss
-          & $iscc installer.iss
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path 'Telezeka-Setup.exe')) { throw 'Installer compilation failed' }
-      - name: Save ready Windows installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: Telezeka-Windows-Installer
-          path: |
-            Telezeka-Setup.exe
-            Telezeka-Windows.zip
-          if-no-files-found: error
-      - name: Publish preview release
-        if: always() && steps.download.outcome != 'failure'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if (!(Test-Path 'Telezeka-Windows.zip')) { throw 'Windows package missing' }
-          $assets = @('Telezeka-Windows.zip')
-          if (Test-Path 'Telezeka-Setup.exe') { $assets += 'Telezeka-Setup.exe' }
-          $tag = 'v0.2.0-preview'
-          gh release view $tag --repo '${{ github.repository }}' *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag @assets --repo '${{ github.repository }}' --target 33dc840486f96264a3e9871cc716e2ecc6e6fe22 --prerelease --title 'Telezeka 0.2.0 Windows preview' --notes 'Early Windows test build; requires compatible HTTPS backend. Does not contain later owner panel or phone/email verification. Unsigned binaries. Keep all DLLs and data together if using ZIP.'
-          } else {
-            gh release upload $tag @assets --repo '${{ github.repository }}' --clobber
-          }
-          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+      - run: echo "Historical v0.2.0-preview is frozen. Use Windows current release instead."
