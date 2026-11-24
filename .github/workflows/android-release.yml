@@ -24,7 +24,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.50.1'
@@ -64,7 +64,7 @@ jobs:
       - run: python scripts/fix_android_jvm.py
       - run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/main.dart
         working-directory: build_app
-      - run: flutter build apk --release --build-name=0.4.1 --build-number=${{ github.run_number }} --dart-define=TELEZEKA_VERSION=0.4.1
+      - run: flutter build apk --release --build-name=0.4.1 --build-number=100${{ github.run_number }} --dart-define=TELEZEKA_VERSION=0.4.1
         working-directory: build_app
       - name: Prepare APK
         run: |
