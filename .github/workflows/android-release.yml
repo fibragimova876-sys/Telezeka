@@ -1,0 +1,55 @@
+name: Android APK - independent release
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/android-release.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.1'
+          channel: stable
+      - run: sdkmanager "platforms;android-36"
+      - run: python scripts/prepare.py
+      - run: flutter pub get
+        working-directory: build_app
+      - run: python scripts/fix_android_jvm.py
+      - run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/main.dart
+        working-directory: build_app
+      - run: flutter build apk --release --build-name=0.4.0 --build-number=40
+        working-directory: build_app
+      - name: Prepare APK
+        run: |
+          mkdir -p dist
+          cp build_app/build/app/outputs/flutter-apk/app-release.apk dist/Telezeka-Android.apk
+          cd dist
+          sha256sum Telezeka-Android.apk > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Telezeka-Android
+          path: dist/*
+          if-no-files-found: error
+      - name: Publish Android preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v0.4.0-android.${GITHUB_RUN_NUMBER}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/Telezeka-Android.apk dist/SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" dist/Telezeka-Android.apk dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Telezeka Android 0.4 preview" --notes "Experimental test-signed Android APK. Server must be deployed and verification providers configured. Not for sensitive communication."
+          fi
