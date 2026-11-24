@@ -59,7 +59,7 @@ def main():
     # Detect them rather than executing a user-writable uninstaller with elevated rights.
     for prop,app_id in [("LEGACY_PREVIEW","TelezekaPreview"),("LEGACY_EXE","Telezeka")]:
         property_node=node(pkg,"Property",Id=prop,Secure="yes")
-        node(property_node,"RegistrySearch",Id=prop+"Search",Root="HKCU",Key=r"Software\Microsoft\Windows\CurrentVersion\Uninstall\"+app_id+"_is1",Name="UninstallString",Type="raw",Bitness="always32")
+        node(property_node,"RegistrySearch",Id=prop+"Search",Root="HKCU",Key="Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\"+app_id+"_is1",Name="UninstallString",Type="raw",Bitness="always32")
     node(pkg,"Launch",Condition="Installed OR (NOT LEGACY_PREVIEW AND NOT LEGACY_EXE)",Message="Обнаружена старая EXE-версия Telezeka. Удалите её через Параметры Windows — Приложения, затем запустите MSI снова. Переписка на сервере сохранится.")
     node(pkg,"MediaTemplate",EmbedCab="yes")
     node(pkg,"Icon",Id="TelezekaIcon",SourceFile=work/"telezeka.ico")
